@@ -1,0 +1,704 @@
+<!-- Syne 3.1 – Fixed syntax errors -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VocalTuner – Syne 3.1</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      html,body,#root{height:100%;overflow:hidden}
+      body{background:#0b0f14;color:#e6edf3;margin:0;padding:0;overscroll-behavior:none}
+      input[type="range"]{accent-color:#9ca3af}
+      canvas{display:block}
+      /* Prevent iOS bounce but allow interaction */
+      *{-webkit-tap-highlight-color:transparent}
+      .no-select{-webkit-user-select:none;user-select:none}
+      /* custom track for Noise Gate slider using CSS var */
+      input.ngate::-webkit-slider-runnable-track{background:var(--ngate-bg,#3f3f46);height:12px;border-radius:9999px;overflow:visible}
+      input.ngate::-moz-range-track{background:var(--ngate-bg,#3f3f46);height:12px;border-radius:9999px;overflow:visible}
+      input.ngate{appearance:none;-webkit-appearance:none;background:transparent;border:0;outline:none;border-radius:9999px;box-shadow:none}
+      input.ngate::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;height:12px;width:12px;border:0;border-radius:9999px;background:#cbd5e1;box-shadow:0 0 0 2px rgba(0,0,0,.25);margin-top:0}
+      input.ngate::-moz-range-thumb{height:12px;width:12px;border:0;border-radius:9999px;background:#cbd5e1;box-shadow:0 0 0 2px rgba(0,0,0,.25)}
+      
+      /* custom track for Input Gain slider using CSS var */
+      input.gain::-webkit-slider-runnable-track{background:var(--gain-bg,#3f3f46);height:12px;border-radius:9999px;overflow:visible}
+      input.gain::-moz-range-track{background:var(--gain-bg,#3f3f46);height:12px;border-radius:9999px;overflow:visible}
+      input.gain{appearance:none;-webkit-appearance:none;background:transparent;border:0;outline:none;border-radius:9999px;box-shadow:none}
+      input.gain::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;height:12px;width:12px;border:0;border-radius:9999px;background:#cbd5e1;box-shadow:0 0 0 2px rgba(0,0,0,.25);margin-top:0}
+      input.gain::-moz-range-thumb{height:12px;width:12px;border:0;border-radius:9999px;background:#cbd5e1;box-shadow:0 0 0 2px rgba(0,0,0,.25)}
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-presets="env,react">
+      const { useEffect, useRef, useState } = React;
+
+      // ===== Music helpers =====
+      const A4 = 440, A4_MIDI = 69;
+      const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+      const lerp  = (a,b,t)=>a+(b-a)*t;
+      const midiToFreq = m => A4 * Math.pow(2, (m - A4_MIDI) / 12);
+      const freqToMidi = f => 69 + 12 * Math.log2(f / 440);
+      const centsOff = (f, ref) => 1200 * Math.log2(f / Math.max(ref||1e-9, 1e-9));
+      const midiToNoteName = m => { const n=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]; const r=Math.round(m); return `${n[(r%12+12)%12]}${Math.floor(r/12)-1}`; };
+
+      function isBlack(m){ const pc = ((m%12)+12)%12; return pc===1||pc===3||pc===6||pc===8||pc===10; }
+
+      // === YIN/CMNDF detector ===
+      function detectPitch(buf, sampleRate, minFreq, maxFreq){
+        const N = buf.length;
+        let mean=0; for(let i=0;i<N;i++) mean += buf[i]; mean/=N;
+        const x=new Float32Array(N);
+        for(let n=0;n<N;n++){ const w=0.5*(1-Math.cos(2*Math.PI*n/(N-1))); x[n]=(buf[n]-mean)*w; }
+        let e0=0; for(let i=0;i<N;i++) e0 += x[i]*x[i];
+        const rms=Math.sqrt(e0/N); if(rms<0.008) return {freq:-1, confidence:0, rms};
+        const tauMin = Math.max(2, Math.floor(sampleRate/Math.max(1e-6, maxFreq||2000)));
+        const tauMax = Math.min(N-3, Math.floor(sampleRate/Math.max(1e-6, minFreq||50)));
+        const d = new Float32Array(tauMax+1);
+        const cmnd = new Float32Array(tauMax+1);
+        d[0]=0; cmnd[0]=1;
+        for(let tau=1; tau<=tauMax; tau++){
+          let s=0; for(let i=0;i<N-tau;i++){ const diff=x[i]-x[i+tau]; s += diff*diff; } d[tau]=s;
+        }
+        let running=0; let tau=1; let bestTau=tauMin; let bestVal=1; const thresh=0.10;
+        for(tau=1; tau<=tauMax; tau++){ running+=d[tau]; cmnd[tau]= d[tau]*tau/(running||1e-12); }
+        let candidate=-1; for(let t=tauMin+1;t<=tauMax-1;t++){ if(cmnd[t]<thresh && cmnd[t]<=cmnd[t-1] && cmnd[t]<=cmnd[t+1]){candidate=t;break;} }
+        if(candidate<0){ for(let t=tauMin;t<=tauMax;t++) if(cmnd[t]<bestVal){bestVal=cmnd[t];bestTau=t;} if(bestVal<0.35) candidate=bestTau; else return {freq:-1,confidence:0,rms}; }
+        if (candidate<=tauMin+1 || candidate>=tauMax-1) return {freq:-1,confidence:0,rms};
+        let t0=candidate,t1=t0; if(t0>1 && t0<tauMax){ const a=cmnd[t0-1],b=cmnd[t0],c=cmnd[t0+1]; const den=(a-2*b+c); if(Math.abs(den)>1e-12){ t1=t0+0.5*(a-c)/den; } }
+        const freq = sampleRate/Math.max(1,t1);
+        if(freq<(minFreq||50)*0.98 || freq>(maxFreq||2000)*1.02) return {freq:-1,confidence:0,rms};
+        const confidence = Math.max(0, 1-cmnd[candidate]);
+        return {freq,confidence,rms};
+      }
+
+      function App(){
+        const NOTE_COLOR = {0:'#00ff4a',1:'#00d6b8',2:'#1e6aff',3:'#6b5cff',4:'#7b23ff',5:'#ff29e1',6:'#ff4396',7:'#ff2a1f',8:'#ff7a1f',9:'#ff9c1a',10:'#ffe81f',11:'#63ff3b'};
+
+        const MIN_MIDI=36, MAX_MIDI=93, RETAIN_SEC=1200; // 20 minutes
+        const headFrac=0.75;
+        const containerRef=useRef(null), railRef=useRef(null), gridRef=useRef(null), traceRef=useRef(null);
+        const auditionRef = useRef(false);
+        const [semitoneH,setSemitoneH]=useState(40); const semitoneHRef=useRef(40);
+        const [widthPx, setWidthPx] = useState(100); const widthPxRef = useRef(100);
+        const [centerMidi,setCenterMidi]=useState(60); const centerMidiRef=useRef(60);
+        const [gainDb,setGainDb]=useState(0); const gainDbRef=useRef(0);
+        const [gateDb,setGateDb]=useState(-45); const gateDbRef=useRef(-45); 
+        const [meterDb,setMeterDb]=useState(-120); const meterSmooth=useRef(-120);
+        
+        // Generate gain background - simplified to medium gray like other sliders
+        const gainBg = '#3f3f46';
+        
+        // Generate noise gate background with level indicator
+        const gateBg = (()=>{ 
+          const min=-80, max=-5; 
+          const m=Math.max(min, Math.min(max, Number.isFinite(meterDb)? meterDb : min)); 
+          const pct=((m-min)/(max-min))*100; 
+          // Color the meter based on gain setting
+          let meterColor = '#22c55e'; // default green
+          if (gainDbRef.current > 5) meterColor = '#3b82f6'; // blue for boost
+          else if (gainDbRef.current < -5) meterColor = '#ef4444'; // red for cut
+          return `linear-gradient(to right, ${meterColor} 0%, ${meterColor} ${pct}%, #3f3f46 ${pct}%, #3f3f46 100%)`; 
+        })();
+        
+        const [playing,setPlaying]=useState(false); const playingRef=useRef(false);
+        const scrollOffsetX=useRef(0); const drawNowRef=useRef(performance.now()/1000); const viewOffsetRef=useRef(0);
+        const drag=useRef({active:false,lastX:0,vx:0});
+        const nodes=useRef({}); const prevT=useRef(null);
+        const history=useRef([]); const lastMidiRef=useRef(null); const midiSmoothRef=useRef(null); const lastManualScrollRef=useRef(0);
+        const lockBuf=useRef([]); const glowMidiRef=useRef(null); const glowStrengthRef=useRef(0);
+        const [noteText,setNoteText]=useState('—'); const [detuneText,setDetuneText]=useState('—'); const [accPct,setAccPct]=useState(0); const [accColor,setAccColor]=useState(null);
+        const [silenced, setSilenced] = useState(true); const silencedRef = useRef(true); const fadeTimerRef = useRef(0);
+        const [tauMs,setTauMs]=useState(0); const tauMsRef=useRef(0);
+        const [linePx,setLinePx]=useState(2); const linePxRef=useRef(2);
+        const [glowResp,setGlowResp]=useState(0); const glowRespRef=useRef(0.5);
+        const [glowInt,setGlowInt]=useState(1.0); const glowIntRef=useRef(1.2);
+        const [settingsOpen,setSettingsOpen]=useState(false);
+        const glowWinRef=useRef(0.4); const glowRampMsRef=useRef(120); const detTimerRef=useRef(0);
+        const GAP_S = 0.30, GAP_PX = 30;
+        const [lockTol, setLockTol] = useState(10); const lockTolRef = useRef(10);
+        const lockRatioRef = useRef(0);
+        const [lockWin, setLockWin] = useState(0.17);
+        const [vibSmooth,setVibSmooth]=useState(0); const vibSmoothRef=useRef(0);
+
+        // === Init mic ===
+        useEffect(()=>{(async()=>{ try{ const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false } }); await initNodes(stream);}catch(err){ console.warn(err); alert('Please allow microphone access (use HTTPS/localhost).'); } })();},[]);
+
+        async function initNodes(stream){
+          const old=nodes.current; if(old.stream){ old.stream.getTracks().forEach(t=>t.stop()); }
+          const ctx = new (window.AudioContext||window.webkitAudioContext)();
+          const src = ctx.createMediaStreamSource(stream);
+          
+          // Add gain node
+          const gain = ctx.createGain();
+          gain.gain.value = Math.pow(10, gainDbRef.current / 20); // Convert dB to linear
+          
+          const hp = ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=70; hp.Q.value=0.707;
+          const analyser = ctx.createAnalyser(); analyser.fftSize=2048; analyser.smoothingTimeConstant = 0.2; 
+          
+          // Chain: src -> gain -> highpass -> analyser
+          src.connect(gain).connect(hp).connect(analyser);
+          
+          nodes.current = { ctx, src, gain, analyser, buffer: new Float32Array(analyser.fftSize), stream };
+          if(!prevT.current) requestAnimationFrame(loop);
+        }
+
+        // === Resize observer ===
+        useEffect(()=>{
+          const ro = new ResizeObserver(()=>{
+            if(!containerRef.current) return;
+            const railW=80; const {clientWidth:w, clientHeight:h} = containerRef.current;
+            if(railRef.current){ railRef.current.width=railW; railRef.current.height=h; }
+            if(gridRef.current){ gridRef.current.width=w-railW; gridRef.current.height=h; }
+            if(traceRef.current){ traceRef.current.width=w-railW; traceRef.current.height=h; }
+            drawRail(); drawGrid(scrollOffsetX.current);
+          });
+          if(containerRef.current) ro.observe(containerRef.current);
+          return ()=> ro.disconnect();
+        },[]);
+
+        // === Scroll/zoom ===
+        useEffect(()=>{
+          const el = containerRef.current; if(!el) return;
+          const onWheel=(e)=>{
+            const nowS = performance.now()/1000; const horizIntent = e.shiftKey || Math.abs(e.deltaX)>Math.abs(e.deltaY);
+            e.preventDefault();
+            if(playingRef.current){
+              const delta = e.deltaY;
+              setCenterMidi(c=>{ const n=clamp(c + delta/(semitoneHRef.current*4), 36, 93); centerMidiRef.current=n; lastManualScrollRef.current = nowS; return n; });
+            } else {
+              if(horizIntent){ const d=(Math.abs(e.deltaX)>0?e.deltaX:e.deltaY); viewOffsetRef.current += d; drag.current.vx = d*0.5; }
+              else { const delta=e.deltaY; setCenterMidi(c=>{ const n=clamp(c + delta/(semitoneHRef.current*4), 36, 93); centerMidiRef.current=n; lastManualScrollRef.current = nowS; return n; }); }
+            }
+          };
+          el.addEventListener('wheel', onWheel, {passive:false});
+          return ()=> el.removeEventListener('wheel', onWheel);
+        },[]);
+
+        // === Row-hold audition (sine) & drag panning ===
+        useEffect(()=>{
+          const surface = containerRef.current; if(!surface) return;
+
+          // Track if we're currently dragging
+          let isDragging = false;
+          let startX = 0, startY = 0;
+          let lastX = 0, lastY = 0;
+
+          function ensureSynth(){
+            const N = nodes.current; const C = window.AudioContext || window.webkitAudioContext;
+            let ctx = N.ctx; if(!ctx){ ctx = new C(); N.ctx = ctx; }
+            try{ ctx.resume && ctx.resume(); }catch{}
+            if(!N.synthGain){ const g = ctx.createGain(); g.gain.value = 0; g.connect(ctx.destination); N.synthGain = g; }
+            if(!N.synthOsc){ const o = ctx.createOscillator(); o.type='sine'; o.frequency.value=440; o.connect(N.synthGain); o.start(); N.synthOsc = o; }
+          }
+          function setSynthFreq(freq){ const N=nodes.current; if(!N.ctx) return; ensureSynth(); const now=N.ctx.currentTime; N.synthOsc.frequency.setTargetAtTime(freq, now, 0.005); N.synthGain.gain.setTargetAtTime(0.15, now, 0.010); }
+          function stopSynth(){ const N=nodes.current; if(!N.ctx||!N.synthGain) return; const now=N.ctx.currentTime; N.synthGain.gain.setTargetAtTime(0.0, now, 0.030); }
+
+          // Utility: map pointer to a canvas (grid or rail) if inside; returns {el, y, h}
+          function pickCanvasAtPointer(clientX, clientY){
+            const grid = gridRef.current, rail = railRef.current;
+            const inside = (el)=>{ if(!el) return false; const r = el.getBoundingClientRect(); return clientX>=r.left && clientX<=r.right && clientY>=r.top && clientY<=r.bottom; };
+            let el = null; if(grid && inside(grid)) el = grid; else if(rail && inside(rail)) el = rail; if(!el) return null;
+            const r = el.getBoundingClientRect(); const cssH = r.height; const cvsH = el.height; let y = (clientY - r.top) * (cvsH/Math.max(1, cssH)); y = Math.max(0, Math.min(cvsH, y));
+            return { el, y, h: cvsH };
+          }
+          function updateSynthFromPointer(clientX, clientY){ const s = pickCanvasAtPointer(clientX, clientY); if(!s) return; const m = Math.round(centerMidiRef.current - (s.y - (s.h/2)) / semitoneHRef.current); const f = midiToFreq(clamp(m,36,93)); setSynthFreq(f); }
+
+          // Universal handler for start (mouse/touch)
+          const handleStart = (e) => {
+            // Extract coordinates
+            let clientX, clientY;
+            if (e.type.includes('touch')) {
+              const touch = e.touches[0];
+              clientX = touch.clientX;
+              clientY = touch.clientY;
+              e.preventDefault(); // Prevent scrolling on touch
+            } else {
+              clientX = e.clientX;
+              clientY = e.clientY;
+            }
+
+            startX = clientX;
+            startY = clientY;
+            lastX = clientX;
+            lastY = clientY;
+
+            const hit = pickCanvasAtPointer(clientX, clientY);
+            
+            if (hit) {
+              // On piano key - play note
+              auditionRef.current = true;
+              try { ensureSynth(); nodes.current.ctx?.resume?.(); } catch {}
+              updateSynthFromPointer(clientX, clientY);
+            } else if (!playingRef.current) {
+              // On empty space - start dragging
+              isDragging = true;
+              drag.current = { active: true, lastX: clientX, vx: 0 };
+            }
+          };
+
+          // Universal handler for move (mouse/touch)
+          const handleMove = (e) => {
+            let clientX, clientY;
+            if (e.type.includes('touch')) {
+              const touch = e.touches[0];
+              clientX = touch.clientX;
+              clientY = touch.clientY;
+              e.preventDefault();
+            } else {
+              clientX = e.clientX;
+              clientY = e.clientY;
+            }
+
+            if (auditionRef.current) {
+              updateSynthFromPointer(clientX, clientY);
+            } else if (isDragging && !playingRef.current) {
+              const dx = clientX - lastX;
+              const dy = clientY - lastY;
+
+              // Update view offset for horizontal scrolling
+              viewOffsetRef.current += dx;
+              drag.current.vx = dx;
+
+              // Update center MIDI for vertical scrolling
+              const pitchDelta = dy / (semitoneHRef.current * 4);
+              const newCenter = clamp(centerMidiRef.current + pitchDelta, 36, 93);
+              centerMidiRef.current = newCenter;
+              setCenterMidi(newCenter);
+
+              lastX = clientX;
+              lastY = clientY;
+            }
+          };
+
+          // Universal handler for end (mouse/touch)
+          const handleEnd = (e) => {
+            if (e.type.includes('touch')) {
+              e.preventDefault();
+            }
+            
+            if (auditionRef.current) {
+              stopSynth();
+              auditionRef.current = false;
+            }
+            
+            isDragging = false;
+            drag.current.active = false;
+          };
+
+          // Mouse events
+          surface.addEventListener('mousedown', handleStart);
+          window.addEventListener('mousemove', handleMove);
+          window.addEventListener('mouseup', handleEnd);
+
+          // Touch events - with explicit passive: false
+          surface.addEventListener('touchstart', handleStart, { passive: false });
+          surface.addEventListener('touchmove', handleMove, { passive: false });
+          surface.addEventListener('touchend', handleEnd, { passive: false });
+          surface.addEventListener('touchcancel', handleEnd, { passive: false });
+
+          const onVis = () => { if (document.hidden) { stopSynth(); auditionRef.current = false; } };
+          document.addEventListener('visibilitychange', onVis);
+
+          return () => {
+            surface.removeEventListener('mousedown', handleStart);
+            window.removeEventListener('mousemove', handleMove);
+            window.removeEventListener('mouseup', handleEnd);
+            surface.removeEventListener('touchstart', handleStart);
+            surface.removeEventListener('touchmove', handleMove);
+            surface.removeEventListener('touchend', handleEnd);
+            surface.removeEventListener('touchcancel', handleEnd);
+            document.removeEventListener('visibilitychange', onVis);
+          };
+        },[]);
+
+        // === Sync to refs ===
+        useEffect(()=>{ semitoneHRef.current = semitoneH; drawGrid(scrollOffsetX.current); drawRail(); }, [semitoneH]);
+        useEffect(()=>{ widthPxRef.current = widthPx; }, [widthPx]);
+        useEffect(()=>{ gainDbRef.current = gainDb; if(nodes.current.gain) nodes.current.gain.gain.value = Math.pow(10, gainDb / 20); }, [gainDb]);
+        useEffect(()=>{ gateDbRef.current = gateDb; }, [gateDb]);
+        useEffect(()=>{ centerMidiRef.current = centerMidi; }, [centerMidi]);
+        useEffect(()=>{ glowWinRef.current = lockWin; }, [lockWin]);
+        useEffect(()=>{ vibSmoothRef.current = (vibSmooth||0)/100; }, [vibSmooth]);
+        useEffect(()=>{ lockTolRef.current = lockTol; }, [lockTol]);
+        useEffect(()=>{ tauMsRef.current = tauMs; }, [tauMs]);
+        useEffect(()=>{ linePxRef.current = linePx; }, [linePx]);
+        useEffect(()=>{ glowIntRef.current = glowInt * 1.2; }, [glowInt]);
+        useEffect(()=>{ playingRef.current = playing; }, [playing]);
+        useEffect(()=>{ silencedRef.current = silenced; }, [silenced]);
+
+        // === Drawing helpers ===
+        const midiToY = (m,h)=> (h/2) + (centerMidiRef.current - m) * semitoneHRef.current;
+        const yToMidi = (y,h)=> centerMidiRef.current - (y - (h/2)) / semitoneHRef.current;
+        function hex(hex6,a){ const h=hex6.replace('#',''); const r=parseInt(h.slice(0,2),16), g=parseInt(h.slice(2,4),16), b=parseInt(h.slice(4,6),16); return `rgba(${r},${g},${b},${a})`; }
+
+        function drawRail(){
+          const cvs=railRef.current; if(!cvs) return; const ctx=cvs.getContext('2d'); const w=cvs.width,h=cvs.height;
+          ctx.clearRect(0,0,w,h); ctx.fillStyle='#0f0f13'; ctx.fillRect(0,0,w,h); ctx.strokeStyle='#2a2a32';
+          ctx.font='700 16px ui-sans-serif,system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
+          const mStart=Math.max(36, Math.floor(centerMidiRef.current - h/(2*semitoneHRef.current))-2);
+          const mEnd  =Math.min(93, Math.ceil (centerMidiRef.current + h/(2*semitoneHRef.current))+2);
+          for(let m=mStart;m<=mEnd;m++){
+            const cy=midiToY(m,h); const top=cy-semitoneHRef.current/2; const ht=semitoneHRef.current;
+            ctx.fillStyle=isBlack(m)?'rgba(255,255,255,0.06)':'rgba(255,255,255,0.03)'; ctx.fillRect(0,top,w,ht);
+            ctx.fillStyle='#d4d4d8'; ctx.fillText(midiToNoteName(m), w/2, cy);
+            ctx.strokeStyle='#2a2a32'; ctx.beginPath(); ctx.moveTo(0, Math.round(top)+0.5); ctx.lineTo(w, Math.round(top)+0.5); ctx.stroke();
+          }
+        }
+
+        function drawGrid(offsetX){
+          const cvs=gridRef.current; if(!cvs) return; const ctx=cvs.getContext('2d'); const w=cvs.width,h=cvs.height;
+          ctx.clearRect(0,0,w,h); ctx.fillStyle='#000'; ctx.fillRect(0,0,w,h);
+          const mStart=Math.max(36, Math.floor(centerMidiRef.current - h/(2*semitoneHRef.current))-2);
+          const mEnd  =Math.min(93, Math.ceil (centerMidiRef.current + h/(2*semitoneHRef.current))+2);
+          for(let m=mStart;m<=mEnd;m++){
+            const cy=midiToY(m,h); const top=cy-semitoneHRef.current/2; const ht=semitoneHRef.current;
+            ctx.fillStyle=(m%2===0)?'#15161a':'#0e0e14'; ctx.fillRect(0,top,w,ht);
+            ctx.strokeStyle='#30323a'; ctx.beginPath(); ctx.moveTo(0, Math.round(top)+0.5); ctx.lineTo(w, Math.round(top)+0.5); ctx.stroke();
+            ctx.strokeStyle='#2b2d35'; ctx.beginPath(); ctx.moveTo(0, Math.round(cy)+0.5); ctx.lineTo(w, Math.round(cy)+0.5); ctx.stroke();
+            if(glowMidiRef.current!==null && Math.round(glowMidiRef.current)===m && glowStrengthRef.current>0){
+              const pc=((m%12)+12)%12; const col=NOTE_COLOR[pc];
+              const g=ctx.createLinearGradient(0,top,0,top+ht);
+              g.addColorStop(0, hex(col, 0.12*glowIntRef.current*glowStrengthRef.current));
+              g.addColorStop(0.5, hex(col, 0.22*glowIntRef.current*glowStrengthRef.current));
+              g.addColorStop(1, hex(col, 0.12*glowIntRef.current*glowStrengthRef.current));
+              ctx.fillStyle=g; ctx.fillRect(0,top,w,ht);
+              ctx.strokeStyle=hex(col,0.5*glowIntRef.current*glowStrengthRef.current);
+              ctx.beginPath(); ctx.moveTo(0, Math.round(cy)+0.5); ctx.lineTo(w, Math.round(cy)+0.5); ctx.stroke();
+            }
+          }
+          const step = widthPxRef.current, majorEvery=4; const start = -((offsetX)%step);
+          for(let x=start; x<w; x+=step){ const idx=Math.round((x+offsetX)/step); const major=(idx%majorEvery)===0; ctx.strokeStyle=major?'#4b4b4b':'#2f2f2f'; ctx.beginPath(); ctx.moveTo(x+0.5,0); ctx.lineTo(x+0.5,h); ctx.stroke(); }
+        }
+
+        // === Main loop ===
+        function loop(t){
+          const N=nodes.current; if(!N.analyser){ requestAnimationFrame(loop); return; }
+          const trace=traceRef.current, grid=gridRef.current, rail=railRef.current; if(!trace||!grid||!rail){ requestAnimationFrame(loop); return; }
+          const w=trace.width, h=trace.height; const headX=Math.floor(w*headFrac);
+
+          const dt = prevT.current ? (t - prevT.current)/1000 : 0; prevT.current=t;
+          N.analyser.getFloatTimeDomainData(N.buffer);
+          let mean=0; for(let i=0;i<N.buffer.length;i++) mean+=N.buffer[i]; mean/=N.buffer.length;
+          let e=0; for(let i=0;i<N.buffer.length;i++){ const v=N.buffer[i]-mean; e+=v*v; } const rmsNow=Math.sqrt(e/N.buffer.length);
+          const dbInst = 20*Math.log10(Math.max(rmsNow,1e-8)); meterSmooth.current = meterSmooth.current*0.85 + dbInst*0.15; setMeterDb(meterSmooth.current);
+
+          let zc=0; for(let i=1;i<N.buffer.length;i++){ const s0=N.buffer[i-1]-mean, s1=N.buffer[i]-mean; if((s0>=0)!==(s1>=0)) zc++; }
+          const zcr = zc/(N.buffer.length-1);
+
+          detTimerRef.current += dt; let freq=-1, confidence=0; if(detTimerRef.current >= 0.016){ const res = detectPitch(N.buffer, N.ctx.sampleRate, midiToFreq(36), midiToFreq(93)); freq = res.freq; confidence = res.confidence; detTimerRef.current = 0; }
+
+          const gateOff = gateDbRef.current <= -70;
+          const openThreshold = gateDbRef.current - 2;
+          const aboveGate = gateOff || (meterSmooth.current >= openThreshold);
+
+          // Check if we should be drawing/updating UI (same logic as line drawing)
+          const shouldUpdate = freq > 0 && (confidence > 0.45 || (confidence > 0.30 && zcr < 0.18)) && aboveGate;
+
+          if(playingRef.current){ scrollOffsetX.current += dt*widthPxRef.current; drawNowRef.current = performance.now()/1000; }
+          else { if(!drag.current.active){ viewOffsetRef.current += drag.current.vx; drag.current.vx *= 0.92; if(Math.abs(drag.current.vx)<0.01) drag.current.vx=0; } }
+
+          if(freq>0 && confidence>0.2){
+            const rawMidi = freqToMidi(freq);
+            
+            // Apply smoothing for line drawing (keep this as before)
+            const tau = Math.max(0, (tauMsRef.current ?? 120));
+            const alpha = (tau<=0 ? 1 : (1 - Math.exp(-Math.max(dt, 1/60) / (tau/1000))));
+            midiSmoothRef.current = (midiSmoothRef.current==null) ? rawMidi : lerp(midiSmoothRef.current, rawMidi, alpha);
+            const midi = midiSmoothRef.current;
+            lastMidiRef.current = midi;
+
+            // For UI display, use raw values for instant response
+            const nearestRaw = Math.round(rawMidi);
+            const detRaw = centsOff(freq, midiToFreq(nearestRaw));
+            
+            // Simple, direct accuracy calculation - 0 cents = 100%, 50+ cents = 0%
+            const absDetRaw = Math.abs(detRaw);
+            const accPercent = Math.round(Math.max(0, Math.min(100, 100 * (1 - absDetRaw / 50))));
+
+            // Keep smoothed values for other uses (auto-scroll, glow calculations, etc.)
+            const nearest = Math.round(midi);
+            const target  = midiToFreq(nearest);
+            const det     = centsOff(midiToFreq(midi), target);
+
+            if (shouldUpdate) {
+              // Direct updates with NO smoothing or delays
+              fadeTimerRef.current = 0;
+              setSilenced(false);
+              setNoteText(midiToNoteName(nearestRaw));
+              setDetuneText(`${detRaw>=0?'+':''}${detRaw.toFixed(0)}c`);
+              
+              // Set accuracy directly
+              setAccPct(accPercent);
+              
+              // Color based on tolerance
+              const withinNow = absDetRaw <= (lockTolRef.current ?? 12);
+              if (withinNow) { 
+                const pc=((nearestRaw%12)+12)%12; 
+                setAccColor(NOTE_COLOR[pc]); 
+              } else { 
+                setAccColor(null); 
+              }
+            } else {
+              // Start fading to silence
+              fadeTimerRef.current += dt;
+            }
+
+            if (playingRef.current){
+              const nowFollow = performance.now()/1000;
+              if (nowFollow - lastManualScrollRef.current > 1.0){
+                const visibleHalf = h / (2*semitoneHRef.current);
+                const margin = 1.0;
+                let targetCenter = centerMidiRef.current;
+                if (midi > centerMidiRef.current + visibleHalf - margin) targetCenter = midi - (visibleHalf - margin);
+                if (midi < centerMidiRef.current - visibleHalf + margin) targetCenter = midi + (visibleHalf - margin);
+                if (targetCenter !== centerMidiRef.current){
+                  const next = clamp(lerp(centerMidiRef.current, targetCenter, 0.10), 36, 93);
+                  centerMidiRef.current = next; setCenterMidi(next);
+                }
+              }
+            }
+
+            // lock/glow update with vibrato-aware tolerance
+            const now = performance.now()/1000;
+            lockBuf.current.push({t:now, nearest, cents:Math.abs((midi-nearest)*100)});
+            while(lockBuf.current.length && now-lockBuf.current[0].t>glowWinRef.current) lockBuf.current.shift();
+            const same = lockBuf.current.filter(s=>s.nearest===nearest);
+            const baseTol = (lockTolRef.current ?? 12);
+            let vibRms = 0; if (same.length){ const sum2 = same.reduce((a,s)=>a + s.cents*s.cents, 0); vibRms = Math.sqrt(sum2 / same.length); }
+            const vibNorm = clamp((vibRms - 5)/35, 0, 1);
+            const tolEff = baseTol * (1 + vibSmoothRef.current * vibNorm);
+            const within = same.filter(s=>s.cents < tolEff);
+            const ratio = same.length ? within.length/same.length : 0;
+            const need = (lockRatioRef.current ?? 0.0);
+            const targetStrength = ratio>need ? Math.min(1, 0.8*ratio) : 0;
+            const gamma = 1 - Math.exp(-Math.max(0, dt) / (glowRampMsRef.current/1000));
+            glowStrengthRef.current = glowStrengthRef.current*(1-gamma) + targetStrength*gamma;
+            glowMidiRef.current = glowStrengthRef.current>0.02?nearest:null;
+          } else {
+            // No valid pitch detected, start fading to silence
+            fadeTimerRef.current += dt;
+          }
+
+          // Handle silence fade-out
+          const FADE_TIME = 0.3; // 300ms fade time
+          if (fadeTimerRef.current > FADE_TIME && !silencedRef.current) {
+            setSilenced(true);
+            setNoteText('—');
+            setDetuneText('—'); 
+            setAccColor(null);
+            setAccPct(0); // Direct set to 0
+          }
+
+          if(playingRef.current && freq>0 && (confidence>0.45 || (confidence>0.30 && zcr<0.18)) && aboveGate){ const now=performance.now()/1000; const mm = lastMidiRef.current ?? freqToMidi(freq); const near = Math.round(mm); tryWriteHistory({t:now, midi:mm, g: glowStrengthRef.current, nearest: near}); const cutoff=now-RETAIN_SEC; while(history.current.length && history.current[0].t<cutoff) history.current.shift(); }
+
+          drawGrid(scrollOffsetX.current); drawRail();
+
+          const ctx=trace.getContext('2d'); ctx.clearRect(0,0,w,h);
+          ctx.strokeStyle='rgba(241,245,249,0.2)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(headX+0.5,0); ctx.lineTo(headX+0.5,h); ctx.stroke();
+          const refNow = playingRef.current ? performance.now()/1000 : drawNowRef.current;
+
+          // retroactive accuracy glow trail
+          ctx.save();
+          for (let i = 1; i < history.current.length; i++) {
+            const p0 = history.current[i - 1], p1 = history.current[i]; if (!p0 || !p1) continue;
+            const segDt = p1.t - p0.t; const isGapSeg = (segDt > GAP_S) || (segDt * widthPxRef.current > GAP_PX); if (isGapSeg) continue;
+            const row0 = Math.round(p0.midi), row1 = Math.round(p1.midi); if (row0 !== row1) continue; const row = row0;
+            const win = glowWinRef.current; let same = 0, within = 0, sum2=0;
+            for (let k = i; k >= 0; k--) { const q = history.current[k]; if (!q) break; const dt = p1.t - q.t; if (dt > win) break; if (Math.round(q.midi) !== row) continue; same++; const cents = Math.abs((q.midi - row) * 100); sum2+=cents*cents; }
+            const baseTol = (lockTolRef.current ?? 12); const vibRms = same? Math.sqrt(sum2/same):0; const vibNorm = clamp((vibRms - 5)/35, 0, 1); const tolEff = baseTol * (1 + vibSmoothRef.current * vibNorm);
+            if (same) { within = 0; for (let k = i; k >= 0; k--) { const q = history.current[k]; if (!q) break; const dt = p1.t - q.t; if (dt > win) break; if (Math.round(q.midi)!==row) continue; const cents = Math.abs((q.midi-row)*100); if (cents < tolEff) within++; } }
+            const ratio = same ? within / same : 0; const g = ratio > 0 ? Math.min(1, 0.8 * ratio) : 0; if (g <= 0) continue;
+            const x0 = headX + (playingRef.current ? 0 : viewOffsetRef.current) - (refNow - p0.t) * widthPxRef.current;
+            const x1 = headX + (playingRef.current ? 0 : viewOffsetRef.current) - (refNow - p1.t) * widthPxRef.current; if (x1 < 0 || x0 > w) continue;
+            const cy = midiToY(row, h); const top = cy - semitoneHRef.current / 2, ht = semitoneHRef.current; const segW = Math.max(1, x1 - x0);
+            const pc = ((row % 12) + 12) % 12; const col = NOTE_COLOR[pc];
+            ctx.save(); ctx.beginPath(); ctx.rect(x0, top, segW, ht); ctx.clip();
+            const band = ctx.createLinearGradient(0, top, 0, top + ht); const TRAIL_GAIN = 3; const aEdge = 0.14 * TRAIL_GAIN * g * glowIntRef.current; const aMid  = 0.28 * TRAIL_GAIN * g * glowIntRef.current;
+            band.addColorStop(0,   hex(col, aEdge)); band.addColorStop(0.5, hex(col, aMid)); band.addColorStop(1,   hex(col, aEdge));
+            ctx.fillStyle = band; ctx.fillRect(x0, top, segW, ht);
+            ctx.strokeStyle = hex(col, 0.45 * TRAIL_GAIN * g * glowIntRef.current); ctx.beginPath(); ctx.moveTo(x0, Math.round(cy) + 0.5); ctx.lineTo(x1, Math.round(cy) + 0.5); ctx.stroke();
+            ctx.restore();
+          }
+          ctx.restore();
+
+          ctx.lineWidth = linePxRef.current; ctx.strokeStyle='#f1f5f9'; ctx.lineCap='round'; ctx.lineJoin='round';
+          let moved = false; let prev = null; ctx.beginPath();
+          for(let i=0;i<history.current.length;i++){
+            const p = history.current[i]; const age = refNow - p.t;
+            const x = headX + (playingRef.current?0:viewOffsetRef.current) - age*widthPxRef.current; if(x < 0) continue;
+            const y = midiToY(p.midi, h);
+            const isGap = prev && (((p.t - prev.t) > GAP_S) || ((p.t - prev.t) * widthPxRef.current > GAP_PX));
+            if(!moved || isGap){ ctx.moveTo(x, y); moved = true; } else{ ctx.lineTo(x, y); }
+            prev = p;
+          }
+          if(moved) ctx.stroke();
+
+          const headMidi = lastMidiRef.current??centerMidiRef.current; const headY = midiToY(headMidi,h); ctx.beginPath(); ctx.arc(headX, headY, 3, 0, Math.PI*2); ctx.fillStyle='#fff'; ctx.fill();
+
+          requestAnimationFrame(loop);
+        }
+
+        function tryWriteHistory(obj){
+          try{
+            const midi = (obj && (obj.midi ?? obj.m ?? obj.noteMidi ?? obj.mid ?? obj.val));
+            const c = (obj?.conf ?? obj?.confidence ?? obj?.c ?? 1);
+            if(!Number.isFinite(midi)) return; if(!(c > 0.2)) return; if(midi < 36 || midi > 93) return;
+            const last = history.current[history.current.length-1];
+            if(last && Number.isFinite(last.midi)){
+              const dt = (obj.t ?? 0) - last.t; const dm = Math.abs(midi - last.midi);
+              const tThresh = 0.3/Math.max(20, widthPxRef.current); const mThresh = 0.06; if(dt < tThresh && dm < mThresh) return;
+            }
+            history.current.push({ t: (obj.t ?? performance.now()/1000), midi, row: (obj.nearest ?? Math.round(midi)) });
+          } catch(err){ }
+        }
+
+        // === UI === THIS WAS THE PROBLEM AREA - return statement needs to be inside the App function
+        return (
+          <div className="w-full h-full flex flex-col select-none">
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-[#0e0e14]/80">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-8 ml-4">
+                  <button onClick={async()=>{try{const ctx = nodes.current.ctx || new (window.AudioContext||window.webkitAudioContext)(); nodes.current.ctx = ctx; await ctx.resume?.(); const stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}); if(nodes.current.stream){ try{ nodes.current.stream.getTracks().forEach(t=>t.stop()); }catch{} } nodes.current.stream = stream; const source = ctx.createMediaStreamSource(stream); const gain = ctx.createGain(); gain.gain.value = Math.pow(10, gainDbRef.current / 20); const hp = ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=70; hp.Q.value=0.707; const analyser = nodes.current.analyser || ctx.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.2; nodes.current.analyser = analyser; nodes.current.buffer = new Float32Array(analyser.fftSize); source.connect(gain).connect(hp).connect(analyser); nodes.current.src = source; nodes.current.gain = gain; }catch(err){ console.error('Mic reconnect failed', err); } }} className="px-4 py-2 rounded-2xl bg-zinc-900 border border-zinc-700 text-zinc-200 hover:bg-zinc-800">Microphone</button>
+                  
+                  {/* Input Gain and Noise Gate column */}
+                  <div className="flex flex-col gap-1">
+                    <div className="grid items-center gap-3" style={{gridTemplateColumns:'80px 104px auto'}}>
+                      <div className="text-xs text-zinc-400 text-right">Input Gain</div>
+                      <input type="range" min="-30" max="30" step="1" value={gainDb} onChange={(e)=>{ const v=parseInt(e.target.value); gainDbRef.current=v; setGainDb(v); }} className="w-[104px] justify-self-center gain appearance-none" style={{ '--gain-bg': gainBg }} />
+                      <div className="text-xs text-zinc-400 tabular-nums">{gainDb>=0?'+':''}{gainDb} dB</div>
+                    </div>
+                    <div className="grid items-center gap-3" style={{gridTemplateColumns:'80px 104px auto'}}>
+                      <div className="text-xs text-zinc-400 text-right">Noise Gate</div>
+                      <input type="range" min="-80" max="-5" step="1" value={gateDb} onChange={(e)=>{ const v=parseInt(e.target.value); gateDbRef.current=v; setGateDb(v); }} className="w-[104px] justify-self-center ngate appearance-none" style={{ '--ngate-bg': gateBg }} />
+                      <div className="text-xs text-zinc-400 tabular-nums">{gateDb} dB{gateDb<=-70? ' (off)':''}</div>
+                    </div>
+                  </div>
+                  
+                  {/* Height/Width column */}
+                  <div className="hidden md:grid items-center gap-2" style={{gridTemplateColumns:'80px 104px 28px'}}>
+                    <div className="text-xs text-zinc-400 text-right">Height</div>
+                    <input type="range" min="16" max="64" step="1" value={semitoneH} className="w-[104px] justify-self-center"
+                      onChange={(e)=>{ const n=parseInt(e.target.value); semitoneHRef.current=n; setSemitoneH(n); }} />
+                    <div className="text-xs text-zinc-400 tabular-nums text-right">{semitoneH}px</div>
+
+                    <div className="text-xs text-zinc-400 text-right">Width</div>
+                    <input type="range" min="20" max="140" step="1" value={widthPx} className="w-[104px] justify-self-center"
+                      onChange={(e)=>{ const n=parseInt(e.target.value); setWidthPx(n); widthPxRef.current=n; }} />
+                    <div className="text-xs text-zinc-400 tabular-nums text-right">{widthPx}px</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-6">
+                {/* Play/Pause */}
+                <button onClick={()=>{ if (!playingRef.current) { const now = performance.now()/1000; const pausedGap = Math.max(0, now - drawNowRef.current); if (pausedGap > 0) { for (let i=0;i<history.current.length;i++){ history.current[i].t += pausedGap; } for (let i=0;i<lockBuf.current.length;i++){ lockBuf.current[i].t += pausedGap; } } viewOffsetRef.current = 0; drawNowRef.current = now; drag.current.vx = 0; setPlaying(true);} else { setPlaying(false);} }} className="group relative h-12 w-20 rounded-2xl bg-[#15151b] border border-white/10 shadow-inner hover:border-white/20 transition" aria-label={playingRef.current? 'Pause':'Play'}>
+                  <div className="absolute inset-0 rounded-2xl ring-1 ring-black/30 pointer-events-none"></div>
+                  <div className="flex items-center justify-center h-full">
+                    {playing ? (
+                      <div className="flex gap-1.5"><span className="block h-8 w-2 bg-zinc-200 rounded"/><span className="block h-8 w-2 bg-zinc-200 rounded"/></div>
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="h-10 w-10 fill-zinc-200"><path d="M8 5v14l11-7z"/></svg>
+                    )}
+                  </div>
+                </button>
+                <button onClick={()=>{ history.current=[]; lockBuf.current=[]; glowMidiRef.current=null; glowStrengthRef.current=0; }} className="px-4 py-2 rounded-2xl bg-[#15151b] border border-white/10 text-zinc-300 hover:border-white/20">Clear History</button>
+
+                {/* Current Note */}
+                <div className="flex flex-col items-center min-w-[140px]">
+                  <div className={`text-xs ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>Current Note</div>
+                  <div className="flex items-center gap-2 mt-1" style={{ color: silenced ? '#71717a' : (accColor || '#9ca3af') }}>
+                    <span className={`inline-block h-5 w-5 rounded-full ${silenced ? 'bg-zinc-600/40' : 'bg-zinc-400/40'}`}/>
+                    <div className={`text-3xl font-semibold tracking-wide ${silenced ? 'text-zinc-600' : ''}`}>{noteText}</div>
+                  </div>
+                </div>
+
+                {/* Accuracy */}
+                <div className="flex flex-col items-center">
+                  <div className={`text-xs ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>Accuracy</div>
+                  <div className="w-64 mt-2">
+                    <div className={`h-3 rounded overflow-hidden ${silenced ? 'bg-zinc-700' : 'bg-zinc-800'}`}>
+                      <div className="h-full rounded transition-all duration-300" style={{width:`${accPct}%`, background: silenced ? '#71717a' : (accColor||'#9ca3af')}}></div>
+                    </div>
+                    <div className={`text-center text-xs mt-1 ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>{accPct}%</div>
+                  </div>
+                </div>
+
+                {/* Detune */}
+                <div className="flex flex-col items-center min-w-[100px]">
+                  <div className={`text-xs ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>Detune</div>
+                  <div className={`text-2xl font-semibold tracking-wide mt-1 ${silenced ? 'text-zinc-600' : ''}`}>{detuneText}</div>
+                </div>
+              </div>
+
+              <div className="relative w-12 flex justify-end">
+                <button onClick={()=>setSettingsOpen(v=>!v)} className="group relative h-12 w-12 rounded-2xl bg-[#15151b] border border-white/10 shadow-inner hover:border-white/20 transition" aria-label="Settings">
+                  <div className="absolute inset-0 rounded-2xl ring-1 ring-black/30 pointer-events-none"></div>
+                  <div className="flex items-center justify-center h-full">
+                    <span className="text-2xl leading-none text-zinc-200 select-none">⚙</span>
+                  </div>
+                </button>
+                {settingsOpen && (
+                  <div className="absolute right-0 top-12 z-50 w-72 rounded-2xl border border-white/10 bg-[#15151b] shadow-xl p-4">
+                    <div className="text-sm text-zinc-300 font-medium mb-3">Tuning Settings</div>
+                    <div className="space-y-4">
+                      <div>
+                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Signal smoothing</span><span>{tauMs} ms</span></div>
+                        <input type="range" min="0" max="30" step="1" value={tauMs} onChange={(e)=>setTauMs(parseInt(e.target.value))} className="w-full"/>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Line thickness</span><span>{linePx} px</span></div>
+                        <input type="range" min="1" max="6" step="1" value={linePx} onChange={(e)=>setLinePx(parseInt(e.target.value))} className="w-full"/>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Glow responsiveness</span><span>{Math.round(glowWinRef.current*1000)} ms / {glowRampMsRef.current} ms</span></div>
+                        <input type="range" min="0" max="1" step="0.01" value={glowResp} onChange={(e)=>setGlowResp(parseFloat(e.target.value))} className="w-full"/>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Glow intensity</span><span>{Math.round(glowInt*100)}%</span></div>
+                        <input type="range" min="0.5" max="2" step="0.01" value={glowInt} onChange={(e)=>setGlowInt(parseFloat(e.target.value))} className="w-full"/>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Lock tolerance</span><span>±{lockTol} c</span></div>
+                        <input type="range" min="5" max="30" step="1" value={lockTol} onChange={(e)=>setLockTol(parseInt(e.target.value))} className="w-full"/>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Lock window</span><span>{Math.round(lockWin*1000)} ms</span></div>
+                        <input type="range" min="80" max="600" step="10" value={Math.round(lockWin*1000)} onChange={(e)=>setLockWin(parseInt(e.target.value)/1000)} className="w-full"/>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Vibrato smoothing</span><span>{vibSmooth}%</span></div>
+                        <input type="range" min="0" max="100" step="1" value={vibSmooth} onChange={(e)=>setVibSmooth(parseInt(e.target.value))} className="w-full"/>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-end gap-2 mt-4">
+                      <button className="px-3 py-1.5 rounded-xl border border-white/10 text-zinc-300 hover:bg-white/5" onClick={()=>{ setTauMs(0); setLinePx(2); setGlowResp(0); setGlowInt(1.0); setLockTol(10); setLockWin(0.17); setVibSmooth(0); }}>Reset</button>
+                      <button className="px-3 py-1.5 rounded-xl bg-zinc-800 border border-white/10 text-zinc-100 hover:bg-zinc-700" onClick={()=>setSettingsOpen(false)}>Close</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Workspace */}
+            <div ref={containerRef} className="relative flex-1 grid grid-cols-[80px,1fr]" style={{overscrollBehavior:'contain', touchAction:'none', WebkitTouchCallout:'none', WebkitUserSelect:'none', userSelect:'none'}}>
+              <canvas ref={railRef} className="h-full w-[80px]" style={{touchAction:'none'}}></canvas>
+              <div className="relative h-full" style={{touchAction:'none'}}>
+                <canvas ref={gridRef} className="absolute inset-0" style={{touchAction:'none'}}></canvas>
+                <canvas ref={traceRef} className="absolute inset-0" style={{touchAction:'none'}}></canvas>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+    </script>
+  </body>
+</html>
