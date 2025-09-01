@@ -108,7 +108,7 @@
         
         const [playing,setPlaying]=useState(false); const playingRef=useRef(false);
         const scrollOffsetX=useRef(0); const drawNowRef=useRef(performance.now()/1000); const viewOffsetRef=useRef(0);
-        const drag=useRef({active:false,lastX:0,vx:0});
+        const drag=useRef({active:false,lastX:0,lastY:0,vx:0}); // Added lastY to initial state
         const nodes=useRef({}); const prevT=useRef(null);
         const history=useRef([]); const lastMidiRef=useRef(null); const midiSmoothRef=useRef(null); const lastManualScrollRef=useRef(0);
         const lockBuf=useRef([]); const glowMidiRef=useRef(null); const glowStrengthRef=useRef(0);
@@ -187,11 +187,6 @@
         useEffect(()=>{
           const surface = containerRef.current; if(!surface) return;
 
-          // Track if we're currently dragging
-          let isDragging = false;
-          let startX = 0, startY = 0;
-          let lastX = 0, lastY = 0;
-
           function ensureSynth(){
             const N = nodes.current; const C = window.AudioContext || window.webkitAudioContext;
             let ctx = N.ctx; if(!ctx){ ctx = new C(); N.ctx = ctx; }
@@ -202,120 +197,124 @@
           function setSynthFreq(freq){ const N=nodes.current; if(!N.ctx) return; ensureSynth(); const now=N.ctx.currentTime; N.synthOsc.frequency.setTargetAtTime(freq, now, 0.005); N.synthGain.gain.setTargetAtTime(0.15, now, 0.010); }
           function stopSynth(){ const N=nodes.current; if(!N.ctx||!N.synthGain) return; const now=N.ctx.currentTime; N.synthGain.gain.setTargetAtTime(0.0, now, 0.030); }
 
-          // Utility: map pointer to a canvas (grid or rail) if inside; returns {el, y, h}
-          function pickCanvasAtPointer(clientX, clientY){
-            const grid = gridRef.current, rail = railRef.current;
-            const inside = (el)=>{ if(!el) return false; const r = el.getBoundingClientRect(); return clientX>=r.left && clientX<=r.right && clientY>=r.top && clientY<=r.bottom; };
-            let el = null; if(grid && inside(grid)) el = grid; else if(rail && inside(rail)) el = rail; if(!el) return null;
-            const r = el.getBoundingClientRect(); const cssH = r.height; const cvsH = el.height; let y = (clientY - r.top) * (cvsH/Math.max(1, cssH)); y = Math.max(0, Math.min(cvsH, y));
-            return { el, y, h: cvsH };
+          // Check if a point is on the rail (piano keys) ONLY
+          function isOnRail(clientX, clientY){
+            const rail = railRef.current;
+            if(!rail) return false;
+            const rect = rail.getBoundingClientRect();
+            return clientX >= rect.left && clientX <= rect.right && 
+                   clientY >= rect.top && clientY <= rect.bottom;
           }
-          function updateSynthFromPointer(clientX, clientY){ const s = pickCanvasAtPointer(clientX, clientY); if(!s) return; const m = Math.round(centerMidiRef.current - (s.y - (s.h/2)) / semitoneHRef.current); const f = midiToFreq(clamp(m,36,93)); setSynthFreq(f); }
+          
+          // Get MIDI from position on rail
+          function getMidiFromRail(clientY){
+            const rail = railRef.current;
+            if(!rail) return null;
+            const rect = rail.getBoundingClientRect();
+            const y = (clientY - rect.top) * (rail.height / rect.height);
+            return Math.round(centerMidiRef.current - (y - (rail.height/2)) / semitoneHRef.current);
+          }
 
-          // Universal handler for start (mouse/touch)
+          // Touch/mouse start
           const handleStart = (e) => {
-            // Extract coordinates
-            let clientX, clientY;
-            if (e.type.includes('touch')) {
-              const touch = e.touches[0];
-              clientX = touch.clientX;
-              clientY = touch.clientY;
-              e.preventDefault(); // Prevent scrolling on touch
-            } else {
-              clientX = e.clientX;
-              clientY = e.clientY;
-            }
-
-            startX = clientX;
-            startY = clientY;
-            lastX = clientX;
-            lastY = clientY;
-
-            const hit = pickCanvasAtPointer(clientX, clientY);
+            const isTouch = e.type === 'touchstart';
+            if(isTouch) e.preventDefault(); // Always prevent default on touch to stop iOS scroll
             
-            if (hit) {
-              // On piano key - play note
-              auditionRef.current = true;
-              try { ensureSynth(); nodes.current.ctx?.resume?.(); } catch {}
-              updateSynthFromPointer(clientX, clientY);
+            const clientX = isTouch ? e.touches[0].clientX : e.clientX;
+            const clientY = isTouch ? e.touches[0].clientY : e.clientY;
+            
+            // Check if we're on the piano keys (rail only, not grid)
+            if (isOnRail(clientX, clientY)) {
+              // Start synth
+              const midi = getMidiFromRail(clientY);
+              if(midi && midi >= 36 && midi <= 93) {
+                auditionRef.current = true;
+                try { ensureSynth(); nodes.current.ctx?.resume?.(); } catch {}
+                setSynthFreq(midiToFreq(midi));
+              }
             } else if (!playingRef.current) {
-              // On empty space - start dragging
-              isDragging = true;
-              drag.current = { active: true, lastX: clientX, vx: 0 };
+              // Start dragging - touch anywhere else enables pan
+              drag.current = { 
+                active: true, 
+                lastX: clientX, 
+                lastY: clientY, 
+                vx: 0 
+              };
             }
           };
 
-          // Universal handler for move (mouse/touch)
+          // Touch/mouse move
           const handleMove = (e) => {
-            let clientX, clientY;
-            if (e.type.includes('touch')) {
-              const touch = e.touches[0];
-              clientX = touch.clientX;
-              clientY = touch.clientY;
-              e.preventDefault();
-            } else {
-              clientX = e.clientX;
-              clientY = e.clientY;
-            }
-
+            const isTouch = e.type === 'touchmove';
+            if(isTouch) e.preventDefault();
+            
+            const clientX = isTouch ? e.touches[0].clientX : e.clientX;
+            const clientY = isTouch ? e.touches[0].clientY : e.clientY;
+            
             if (auditionRef.current) {
-              updateSynthFromPointer(clientX, clientY);
-            } else if (isDragging && !playingRef.current) {
-              const dx = clientX - lastX;
-              const dy = clientY - lastY;
-
-              // Update view offset for horizontal scrolling
+              // Update synth if still on rail
+              if(isOnRail(clientX, clientY)) {
+                const midi = getMidiFromRail(clientY);
+                if(midi && midi >= 36 && midi <= 93) {
+                  setSynthFreq(midiToFreq(midi));
+                }
+              }
+            } else if (drag.current.active && !playingRef.current) {
+              // Pan the view
+              const dx = clientX - drag.current.lastX;
+              const dy = clientY - drag.current.lastY;
+              
+              // Horizontal scrolling
               viewOffsetRef.current += dx;
               drag.current.vx = dx;
-
-              // Update center MIDI for vertical scrolling
-              const pitchDelta = dy / (semitoneHRef.current * 4);
-              const newCenter = clamp(centerMidiRef.current + pitchDelta, 36, 93);
-              centerMidiRef.current = newCenter;
-              setCenterMidi(newCenter);
-
-              lastX = clientX;
-              lastY = clientY;
+              
+              // Vertical scrolling - invert for natural feel
+              const pitchDelta = -dy / (semitoneHRef.current * 4);
+              setCenterMidi(c => { 
+                const n = clamp(c + pitchDelta, 36, 93); 
+                centerMidiRef.current = n; 
+                return n; 
+              });
+              
+              drag.current.lastX = clientX;
+              drag.current.lastY = clientY;
             }
           };
 
-          // Universal handler for end (mouse/touch)
+          // Touch/mouse end
           const handleEnd = (e) => {
-            if (e.type.includes('touch')) {
-              e.preventDefault();
-            }
+            const isTouch = e.type.includes('touch');
+            if(isTouch) e.preventDefault();
             
             if (auditionRef.current) {
               stopSynth();
               auditionRef.current = false;
             }
             
-            isDragging = false;
             drag.current.active = false;
           };
 
-          // Mouse events
-          surface.addEventListener('mousedown', handleStart);
-          window.addEventListener('mousemove', handleMove);
-          window.addEventListener('mouseup', handleEnd);
-
-          // Touch events - with explicit passive: false
+          // Add event listeners
           surface.addEventListener('touchstart', handleStart, { passive: false });
           surface.addEventListener('touchmove', handleMove, { passive: false });
           surface.addEventListener('touchend', handleEnd, { passive: false });
           surface.addEventListener('touchcancel', handleEnd, { passive: false });
+          
+          surface.addEventListener('mousedown', handleStart);
+          window.addEventListener('mousemove', handleMove);
+          window.addEventListener('mouseup', handleEnd);
 
           const onVis = () => { if (document.hidden) { stopSynth(); auditionRef.current = false; } };
           document.addEventListener('visibilitychange', onVis);
 
           return () => {
-            surface.removeEventListener('mousedown', handleStart);
-            window.removeEventListener('mousemove', handleMove);
-            window.removeEventListener('mouseup', handleEnd);
             surface.removeEventListener('touchstart', handleStart);
             surface.removeEventListener('touchmove', handleMove);
             surface.removeEventListener('touchend', handleEnd);
             surface.removeEventListener('touchcancel', handleEnd);
+            surface.removeEventListener('mousedown', handleStart);
+            window.removeEventListener('mousemove', handleMove);
+            window.removeEventListener('mouseup', handleEnd);
             document.removeEventListener('visibilitychange', onVis);
           };
         },[]);
@@ -404,7 +403,14 @@
           const shouldUpdate = freq > 0 && (confidence > 0.45 || (confidence > 0.30 && zcr < 0.18)) && aboveGate;
 
           if(playingRef.current){ scrollOffsetX.current += dt*widthPxRef.current; drawNowRef.current = performance.now()/1000; }
-          else { if(!drag.current.active){ viewOffsetRef.current += drag.current.vx; drag.current.vx *= 0.92; if(Math.abs(drag.current.vx)<0.01) drag.current.vx=0; } }
+          else { 
+            // Apply momentum only when there's actual velocity
+            if(!drag.current.active && Math.abs(drag.current.vx) > 0.01){ 
+              viewOffsetRef.current += drag.current.vx; 
+              drag.current.vx *= 0.92; 
+              if(Math.abs(drag.current.vx)<0.01) drag.current.vx=0; 
+            } 
+          }
 
           if(freq>0 && confidence>0.2){
             const rawMidi = freqToMidi(freq);
