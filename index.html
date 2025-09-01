@@ -166,6 +166,9 @@
         useEffect(()=>{
           const el = containerRef.current; if(!el) return;
           const onWheel=(e)=>{
+            // Only handle actual wheel events, not touch gestures
+            if(e.deltaMode === undefined) return;
+            
             const nowS = performance.now()/1000; const horizIntent = e.shiftKey || Math.abs(e.deltaX)>Math.abs(e.deltaY);
             e.preventDefault();
             if(playingRef.current){
