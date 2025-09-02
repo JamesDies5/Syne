@@ -732,7 +732,7 @@
                 <div className="flex-1">
                   <div className="text-xs text-zinc-500 mb-1 text-right">Accuracy</div>
                   <div className="relative">
-                    <div className="h-4 rounded-full overflow-hidden bg-zinc-800">
+                    <div className="h-5 rounded-full overflow-hidden bg-zinc-800">
                       <div className="h-full rounded-full transition-all duration-150" 
                            style={{width:`${accPct ?? 0}%`, background: silenced ? '#71717a' : (accColor||'#71717a')}}></div>
                       <div className="absolute top-0 h-full w-[2px] bg-white/30" 
@@ -753,24 +753,58 @@
                 </div>
               </div>
 
-              {/* Gain/Gate Controls */}
+              {/* Gain/Gate Controls - Single Row */}
               <div className="px-4 py-3 border-t border-zinc-800 bg-[#0e0e14]">
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-zinc-400 w-10">Gain</span>
-                    <input type="range" min="-30" max="30" step="1" value={gainDb} 
-                           onChange={(e)=>{ const v=parseInt(e.target.value); gainDbRef.current=v; setGainDb(v); }} 
-                           className="flex-1 gain appearance-none" style={{ '--gain-bg': '#3f3f46' }} />
-                    <span className="text-xs text-zinc-400 tabular-nums w-12 text-right">
+                <div className="flex items-center gap-4">
+                  <div className="flex-1 flex items-center gap-2">
+                    <span className="text-xs text-zinc-400">Gain</span>
+                    <div className="flex-1 relative">
+                      <input type="range" min="-30" max="30" step="1" value={gainDb} 
+                             onChange={(e)=>{ const v=parseInt(e.target.value); gainDbRef.current=v; setGainDb(v); }} 
+                             className="w-full" 
+                             style={{ 
+                               WebkitAppearance: 'none',
+                               appearance: 'none',
+                               background: 'transparent',
+                               height: '20px'
+                             }} />
+                      <style>{`
+                        input[type="range"]::-webkit-slider-track {
+                          height: 20px;
+                          background: #3f3f46;
+                          border-radius: 10px;
+                        }
+                        input[type="range"]::-webkit-slider-thumb {
+                          -webkit-appearance: none;
+                          appearance: none;
+                          width: 20px;
+                          height: 20px;
+                          background: #cbd5e1;
+                          border-radius: 50%;
+                          cursor: pointer;
+                        }
+                      `}</style>
+                    </div>
+                    <span className="text-xs text-zinc-400 tabular-nums w-10 text-right">
                       {gainDb>=0?'+':''}{gainDb} db
                     </span>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-zinc-400 w-10">Gate</span>
-                    <input type="range" min="-80" max="-5" step="1" value={gateDb} 
-                           onChange={(e)=>{ const v=parseInt(e.target.value); gateDbRef.current=v; setGateDb(v); }} 
-                           className="flex-1 ngate appearance-none" style={{ '--ngate-bg': gateBg }} />
-                    <span className="text-xs text-zinc-400 tabular-nums w-12 text-right">
+                  
+                  <div className="flex-1 flex items-center gap-2">
+                    <span className="text-xs text-zinc-400">Gate</span>
+                    <div className="flex-1 relative">
+                      <input type="range" min="-80" max="-5" step="1" value={gateDb} 
+                             onChange={(e)=>{ const v=parseInt(e.target.value); gateDbRef.current=v; setGateDb(v); }} 
+                             className="w-full ngate" 
+                             style={{ 
+                               '--ngate-bg': gateBg,
+                               WebkitAppearance: 'none',
+                               appearance: 'none',
+                               background: 'transparent',
+                               height: '20px'
+                             }} />
+                    </div>
+                    <span className="text-xs text-zinc-400 tabular-nums w-10 text-right">
                       {gateDb} db
                     </span>
                   </div>
@@ -802,16 +836,20 @@
                     setPlaying(false);
                   } 
                 }} 
-                className="p-4 rounded-full bg-zinc-900 border border-zinc-700">
-                  {playing ? (
-                    <svg className="w-8 h-8 fill-zinc-100" viewBox="0 0 24 24">
-                      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
-                    </svg>
-                  ) : (
-                    <svg className="w-8 h-8 fill-zinc-100" viewBox="0 0 24 24">
-                      <path d="M8 5v14l11-7z"/>
-                    </svg>
-                  )}
+                className="relative h-16 w-20 rounded-2xl bg-[#15151b] border border-white/10 shadow-inner">
+                  <div className="absolute inset-0 rounded-2xl ring-1 ring-black/30 pointer-events-none"></div>
+                  <div className="flex items-center justify-center h-full">
+                    {playing ? (
+                      <div className="flex gap-1.5">
+                        <span className="block h-8 w-2 bg-zinc-200 rounded"/>
+                        <span className="block h-8 w-2 bg-zinc-200 rounded"/>
+                      </div>
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="h-10 w-10 fill-zinc-200">
+                        <path d="M8 5v14l11-7z"/>
+                      </svg>
+                    )}
+                  </div>
                 </button>
                 
                 <button onClick={()=>{ 
@@ -828,89 +866,91 @@
               {/* Mobile Settings Panel (slides up from bottom) */}
               {settingsOpen && (
                 <div className="fixed inset-0 bg-black/50 z-50" onClick={()=>setSettingsOpen(false)}>
-                  <div className="absolute bottom-0 left-0 right-0 bg-[#15151b] rounded-t-3xl border-t border-zinc-700 p-6 max-h-[80vh] overflow-y-auto"
+                  <div className="absolute bottom-0 left-0 right-0 bg-[#15151b] rounded-t-3xl border-t border-zinc-700 max-h-[80vh] overflow-y-auto"
                        onClick={(e)=>e.stopPropagation()}>
-                    <div className="w-12 h-1 bg-zinc-600 rounded-full mx-auto mb-6"/>
-                    
-                    <div className="space-y-5">
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm text-zinc-300">Height</span>
-                          <span className="text-sm text-zinc-400">{semitoneH} px</span>
-                        </div>
-                        <input type="range" min="16" max="64" step="1" value={semitoneH} 
-                               onChange={(e)=>{ const n=parseInt(e.target.value); semitoneHRef.current=n; setSemitoneH(n); }} 
-                               className="w-full"/>
-                      </div>
+                    <div className="p-6">
+                      <div className="w-12 h-1 bg-zinc-600 rounded-full mx-auto mb-6"/>
                       
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm text-zinc-300">Width</span>
-                          <span className="text-sm text-zinc-400">{widthPx} px</span>
+                      <div className="space-y-5">
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm text-zinc-300">Height</span>
+                            <span className="text-sm text-zinc-400">{semitoneH} px</span>
+                          </div>
+                          <input type="range" min="16" max="64" step="1" value={semitoneH} 
+                                 onChange={(e)=>{ const n=parseInt(e.target.value); semitoneHRef.current=n; setSemitoneH(n); }} 
+                                 className="w-full"/>
                         </div>
-                        <input type="range" min="20" max="140" step="1" value={widthPx} 
-                               onChange={(e)=>{ const n=parseInt(e.target.value); setWidthPx(n); widthPxRef.current=n; }} 
-                               className="w-full"/>
-                      </div>
-                      
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm text-zinc-300">Line Thickness</span>
-                          <span className="text-sm text-zinc-400">{linePx} px</span>
+                        
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm text-zinc-300">Width</span>
+                            <span className="text-sm text-zinc-400">{widthPx} px</span>
+                          </div>
+                          <input type="range" min="20" max="140" step="1" value={widthPx} 
+                                 onChange={(e)=>{ const n=parseInt(e.target.value); setWidthPx(n); widthPxRef.current=n; }} 
+                                 className="w-full"/>
                         </div>
-                        <input type="range" min="1" max="6" step="1" value={linePx} 
-                               onChange={(e)=>setLinePx(parseInt(e.target.value))} 
-                               className="w-full"/>
-                      </div>
-                      
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm text-zinc-300">Glow Intensity</span>
-                          <span className="text-sm text-zinc-400">{Math.round(glowInt*100)}%</span>
+                        
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm text-zinc-300">Line Thickness</span>
+                            <span className="text-sm text-zinc-400">{linePx} px</span>
+                          </div>
+                          <input type="range" min="1" max="6" step="1" value={linePx} 
+                                 onChange={(e)=>setLinePx(parseInt(e.target.value))} 
+                                 className="w-full"/>
                         </div>
-                        <input type="range" min="0.5" max="2" step="0.01" value={glowInt} 
-                               onChange={(e)=>setGlowInt(parseFloat(e.target.value))} 
-                               className="w-full"/>
-                      </div>
-                      
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm text-zinc-300">Lock Tolerance</span>
-                          <span className="text-sm text-zinc-400">±{lockTol} c</span>
+                        
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm text-zinc-300">Glow Intensity</span>
+                            <span className="text-sm text-zinc-400">{Math.round(glowInt*100)}%</span>
+                          </div>
+                          <input type="range" min="0.5" max="2" step="0.01" value={glowInt} 
+                                 onChange={(e)=>setGlowInt(parseFloat(e.target.value))} 
+                                 className="w-full"/>
                         </div>
-                        <input type="range" min="5" max="30" step="1" value={lockTol} 
-                               onChange={(e)=>setLockTol(parseInt(e.target.value))} 
-                               className="w-full"/>
-                      </div>
-                      
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm text-zinc-300">Lock Window</span>
-                          <span className="text-sm text-zinc-400">{Math.round(lockWin*1000)} ms</span>
+                        
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm text-zinc-300">Lock Tolerance</span>
+                            <span className="text-sm text-zinc-400">±{lockTol} c</span>
+                          </div>
+                          <input type="range" min="5" max="30" step="1" value={lockTol} 
+                                 onChange={(e)=>setLockTol(parseInt(e.target.value))} 
+                                 className="w-full"/>
                         </div>
-                        <input type="range" min="80" max="600" step="10" value={Math.round(lockWin*1000)} 
-                               onChange={(e)=>setLockWin(parseInt(e.target.value)/1000)} 
-                               className="w-full"/>
-                      </div>
+                        
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm text-zinc-300">Lock Window</span>
+                            <span className="text-sm text-zinc-400">{Math.round(lockWin*1000)} ms</span>
+                          </div>
+                          <input type="range" min="80" max="600" step="10" value={Math.round(lockWin*1000)} 
+                                 onChange={(e)=>setLockWin(parseInt(e.target.value)/1000)} 
+                                 className="w-full"/>
+                        </div>
 
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm text-zinc-300">Signal Smoothing</span>
-                          <span className="text-sm text-zinc-400">{tauMs} ms</span>
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm text-zinc-300">Signal Smoothing</span>
+                            <span className="text-sm text-zinc-400">{tauMs} ms</span>
+                          </div>
+                          <input type="range" min="0" max="30" step="1" value={tauMs} 
+                                 onChange={(e)=>setTauMs(parseInt(e.target.value))} 
+                                 className="w-full"/>
                         </div>
-                        <input type="range" min="0" max="30" step="1" value={tauMs} 
-                               onChange={(e)=>setTauMs(parseInt(e.target.value))} 
-                               className="w-full"/>
-                      </div>
 
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm text-zinc-300">Vibrato Smoothing</span>
-                          <span className="text-sm text-zinc-400">{vibSmooth}%</span>
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm text-zinc-300">Vibrato Smoothing</span>
+                            <span className="text-sm text-zinc-400">{vibSmooth}%</span>
+                          </div>
+                          <input type="range" min="0" max="100" step="1" value={vibSmooth} 
+                                 onChange={(e)=>setVibSmooth(parseInt(e.target.value))} 
+                                 className="w-full"/>
                         </div>
-                        <input type="range" min="0" max="100" step="1" value={vibSmooth} 
-                               onChange={(e)=>setVibSmooth(parseInt(e.target.value))} 
-                               className="w-full"/>
                       </div>
                     </div>
                   </div>
