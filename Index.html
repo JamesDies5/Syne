@@ -186,6 +186,10 @@
         // === Row-hold audition (sine) & drag panning ===
         useEffect(()=>{
           const surface = containerRef.current; if(!surface) return;
+          const grid = gridRef.current;
+          const rail = railRef.current;
+          const trace = traceRef.current;
+          if(!grid || !rail || !trace) return;
 
           function ensureSynth(){
             const N = nodes.current; const C = window.AudioContext || window.webkitAudioContext;
@@ -199,8 +203,6 @@
 
           // Check if a point is on the rail (piano keys) ONLY
           function isOnRail(clientX, clientY){
-            const rail = railRef.current;
-            if(!rail) return false;
             const rect = rail.getBoundingClientRect();
             return clientX >= rect.left && clientX <= rect.right && 
                    clientY >= rect.top && clientY <= rect.bottom;
@@ -208,8 +210,6 @@
           
           // Get MIDI from position on rail
           function getMidiFromRail(clientY){
-            const rail = railRef.current;
-            if(!rail) return null;
             const rect = rail.getBoundingClientRect();
             const y = (clientY - rect.top) * (rail.height / rect.height);
             return Math.round(centerMidiRef.current - (y - (rail.height/2)) / semitoneHRef.current);
@@ -217,6 +217,7 @@
 
           // Touch/mouse start
           const handleStart = (e) => {
+            e.stopPropagation(); // Stop event bubbling
             const isTouch = e.type === 'touchstart';
             if(isTouch) e.preventDefault(); // Always prevent default on touch to stop iOS scroll
             
@@ -245,6 +246,7 @@
 
           // Touch/mouse move
           const handleMove = (e) => {
+            e.stopPropagation();
             const isTouch = e.type === 'touchmove';
             if(isTouch) e.preventDefault();
             
@@ -283,6 +285,7 @@
 
           // Touch/mouse end
           const handleEnd = (e) => {
+            e.stopPropagation();
             const isTouch = e.type.includes('touch');
             if(isTouch) e.preventDefault();
             
@@ -294,13 +297,18 @@
             drag.current.active = false;
           };
 
-          // Add event listeners
-          surface.addEventListener('touchstart', handleStart, { passive: false });
-          surface.addEventListener('touchmove', handleMove, { passive: false });
-          surface.addEventListener('touchend', handleEnd, { passive: false });
-          surface.addEventListener('touchcancel', handleEnd, { passive: false });
+          // Add event listeners to ALL canvas elements to ensure touch events are captured
+          const canvases = [rail, grid, trace];
+          canvases.forEach(canvas => {
+            canvas.addEventListener('touchstart', handleStart, { passive: false });
+            canvas.addEventListener('touchmove', handleMove, { passive: false });
+            canvas.addEventListener('touchend', handleEnd, { passive: false });
+            canvas.addEventListener('touchcancel', handleEnd, { passive: false });
+            
+            canvas.addEventListener('mousedown', handleStart);
+          });
           
-          surface.addEventListener('mousedown', handleStart);
+          // Mouse move and up on window for desktop
           window.addEventListener('mousemove', handleMove);
           window.addEventListener('mouseup', handleEnd);
 
@@ -308,11 +316,13 @@
           document.addEventListener('visibilitychange', onVis);
 
           return () => {
-            surface.removeEventListener('touchstart', handleStart);
-            surface.removeEventListener('touchmove', handleMove);
-            surface.removeEventListener('touchend', handleEnd);
-            surface.removeEventListener('touchcancel', handleEnd);
-            surface.removeEventListener('mousedown', handleStart);
+            canvases.forEach(canvas => {
+              canvas.removeEventListener('touchstart', handleStart);
+              canvas.removeEventListener('touchmove', handleMove);
+              canvas.removeEventListener('touchend', handleEnd);
+              canvas.removeEventListener('touchcancel', handleEnd);
+              canvas.removeEventListener('mousedown', handleStart);
+            });
             window.removeEventListener('mousemove', handleMove);
             window.removeEventListener('mouseup', handleEnd);
             document.removeEventListener('visibilitychange', onVis);
