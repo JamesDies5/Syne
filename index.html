@@ -270,8 +270,8 @@
               viewOffsetRef.current += dx;
               drag.current.vx = dx;
               
-              // Vertical scrolling - invert for natural feel
-              const pitchDelta = -dy / (semitoneHRef.current * 4);
+              // Vertical scrolling - natural touch feel (swipe down = content moves down = pitch goes up)
+              const pitchDelta = dy / (semitoneHRef.current * 2); // Reduced divisor from 4 to 2 for stronger scrolling
               setCenterMidi(c => { 
                 const n = clamp(c + pitchDelta, 36, 93); 
                 centerMidiRef.current = n; 
