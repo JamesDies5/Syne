@@ -1,4 +1,4 @@
-<!-- Syne 3.1 – Fixed syntax errors -->
+<!-- Syne 3.1 – v74 Fixed vibrato detection for glow trail -->
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -112,8 +112,11 @@
         const nodes=useRef({}); const prevT=useRef(null);
         const history=useRef([]); const lastMidiRef=useRef(null); const midiSmoothRef=useRef(null); const lastManualScrollRef=useRef(0);
         const lockBuf=useRef([]); const glowMidiRef=useRef(null); const glowStrengthRef=useRef(0);
-        const [noteText,setNoteText]=useState('—'); const [detuneText,setDetuneText]=useState('—'); const [accPct,setAccPct]=useState(0); const [accColor,setAccColor]=useState(null);
+        const [noteText,setNoteText]=useState('—'); const [detuneText,setDetuneText]=useState('—'); 
+        const [accPct,setAccPct]=useState(null); // Start with null instead of 0
+        const [accColor,setAccColor]=useState(null);
         const [silenced, setSilenced] = useState(true); const silencedRef = useRef(true); const fadeTimerRef = useRef(0);
+        const accSmoothRef = useRef(null); // Add smoothing for accuracy display only
         const [tauMs,setTauMs]=useState(0); const tauMsRef=useRef(0);
         const [linePx,setLinePx]=useState(2); const linePxRef=useRef(2);
         const [glowResp,setGlowResp]=useState(0); const glowRespRef=useRef(0.5);
@@ -271,7 +274,7 @@
               drag.current.vx = dx;
               
               // Vertical scrolling - natural touch feel (swipe down = content moves down = pitch goes up)
-              const pitchDelta = dy / (semitoneHRef.current * 2); // Reduced divisor from 4 to 2 for stronger scrolling
+              const pitchDelta = dy / (semitoneHRef.current * 2); // Reduced divisor for stronger scrolling
               setCenterMidi(c => { 
                 const n = clamp(c + pitchDelta, 36, 93); 
                 centerMidiRef.current = n; 
@@ -337,6 +340,7 @@
         useEffect(()=>{ centerMidiRef.current = centerMidi; }, [centerMidi]);
         useEffect(()=>{ glowWinRef.current = lockWin; }, [lockWin]);
         useEffect(()=>{ vibSmoothRef.current = (vibSmooth||0)/100; }, [vibSmooth]);
+        // keep lock tolerance ref in sync so retro trail + gauge react instantly
         useEffect(()=>{ lockTolRef.current = lockTol; }, [lockTol]);
         useEffect(()=>{ tauMsRef.current = tauMs; }, [tauMs]);
         useEffect(()=>{ linePxRef.current = linePx; }, [linePx]);
@@ -425,39 +429,54 @@
           if(freq>0 && confidence>0.2){
             const rawMidi = freqToMidi(freq);
             
-            // Apply smoothing for line drawing (keep this as before)
+            // Apply smoothing ONLY for line drawing
             const tau = Math.max(0, (tauMsRef.current ?? 120));
             const alpha = (tau<=0 ? 1 : (1 - Math.exp(-Math.max(dt, 1/60) / (tau/1000))));
             midiSmoothRef.current = (midiSmoothRef.current==null) ? rawMidi : lerp(midiSmoothRef.current, rawMidi, alpha);
             const midi = midiSmoothRef.current;
             lastMidiRef.current = midi;
 
-            // For UI display, use raw values for instant response
+            // Calculate accuracy based on RAW pitch for instant response
             const nearestRaw = Math.round(rawMidi);
             const detRaw = centsOff(freq, midiToFreq(nearestRaw));
-            
-            // Simple, direct accuracy calculation - 0 cents = 100%, 50+ cents = 0%
             const absDetRaw = Math.abs(detRaw);
-            const accPercent = Math.round(Math.max(0, Math.min(100, 100 * (1 - absDetRaw / 50))));
+            
+            // Get tolerance value for use in multiple places
+            const tolerance = lockTolRef.current ?? 10;
+            
+            // Accuracy calculation aligned with lock tolerance:
+            // Map 0 to 50 cents linearly to 0-100%
+            const maxCents = 50; // Maximum cents for 0% accuracy
+            const accPercent = Math.round(Math.max(0, Math.min(100, 100 * (1 - absDetRaw / maxCents))));
 
-            // Keep smoothed values for other uses (auto-scroll, glow calculations, etc.)
+            // Keep smoothed values for other uses
             const nearest = Math.round(midi);
             const target  = midiToFreq(nearest);
             const det     = centsOff(midiToFreq(midi), target);
 
             if (shouldUpdate) {
-              // Direct updates with NO smoothing or delays
+              // Direct updates with light smoothing for display stability
               fadeTimerRef.current = 0;
               setSilenced(false);
               setNoteText(midiToNoteName(nearestRaw));
               setDetuneText(`${detRaw>=0?'+':''}${detRaw.toFixed(0)}c`);
               
-              // Set accuracy directly
-              setAccPct(accPercent);
+              // Apply heavy smoothing to accuracy display to reduce vibrato jitter
+              if (accSmoothRef.current === null) {
+                // First reading - set directly
+                accSmoothRef.current = accPercent;
+              } else {
+                // Smooth subsequent readings (0.1 = heavy smoothing for stability)
+                const smoothAlpha = 0.1;
+                accSmoothRef.current = accSmoothRef.current * (1 - smoothAlpha) + accPercent * smoothAlpha;
+              }
+              const smoothedAcc = Math.round(accSmoothRef.current);
+              setAccPct(smoothedAcc);
               
-              // Color based on tolerance
-              const withinNow = absDetRaw <= (lockTolRef.current ?? 12);
-              if (withinNow) { 
+              // Color changes based on smoothed accuracy crossing the threshold
+              // The threshold line position represents where lock tolerance is
+              const thresholdPercent = 100 * (1 - tolerance / 50);
+              if (smoothedAcc >= thresholdPercent) { 
                 const pc=((nearestRaw%12)+12)%12; 
                 setAccColor(NOTE_COLOR[pc]); 
               } else { 
@@ -483,7 +502,7 @@
               }
             }
 
-            // lock/glow update with vibrato-aware tolerance
+            // lock/glow update still uses SMOOTHED midi for stability
             const now = performance.now()/1000;
             lockBuf.current.push({t:now, nearest, cents:Math.abs((midi-nearest)*100)});
             while(lockBuf.current.length && now-lockBuf.current[0].t>glowWinRef.current) lockBuf.current.shift();
@@ -511,7 +530,8 @@
             setNoteText('—');
             setDetuneText('—'); 
             setAccColor(null);
-            setAccPct(0); // Direct set to 0
+            setAccPct(null); // Set to null instead of 0
+            accSmoothRef.current = null; // Reset smoothing
           }
 
           if(playingRef.current && freq>0 && (confidence>0.45 || (confidence>0.30 && zcr<0.18)) && aboveGate){ const now=performance.now()/1000; const mm = lastMidiRef.current ?? freqToMidi(freq); const near = Math.round(mm); tryWriteHistory({t:now, midi:mm, g: glowStrengthRef.current, nearest: near}); const cutoff=now-RETAIN_SEC; while(history.current.length && history.current[0].t<cutoff) history.current.shift(); }
@@ -577,7 +597,7 @@
           } catch(err){ }
         }
 
-        // === UI === THIS WAS THE PROBLEM AREA - return statement needs to be inside the App function
+        // === UI ===
         return (
           <div className="w-full h-full flex flex-col select-none">
             {/* Header */}
@@ -642,10 +662,17 @@
                 <div className="flex flex-col items-center">
                   <div className={`text-xs ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>Accuracy</div>
                   <div className="w-64 mt-2">
-                    <div className={`h-3 rounded overflow-hidden ${silenced ? 'bg-zinc-700' : 'bg-zinc-800'}`}>
-                      <div className="h-full rounded transition-all duration-300" style={{width:`${accPct}%`, background: silenced ? '#71717a' : (accColor||'#9ca3af')}}></div>
+                    <div className={`h-3 rounded overflow-hidden relative ${silenced ? 'bg-zinc-800' : 'bg-zinc-800'}`}>
+                      <div className="h-full rounded" style={{width:`${accPct ?? 0}%`, background: silenced ? '#71717a' : (accColor||'#71717a')}}></div>
+                      {/* Lock tolerance threshold line - always visible */}
+                      <div 
+                        className="absolute top-0 h-full w-[2px] bg-white/50" 
+                        style={{
+                          left: `${100 * (1 - lockTol / 50)}%`
+                        }}
+                      />
                     </div>
-                    <div className={`text-center text-xs mt-1 ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>{accPct}%</div>
+                    <div className={`text-center text-xs mt-1 ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>{accPct ?? 0}%</div>
                   </div>
                 </div>
 
@@ -694,6 +721,40 @@
                       <div>
                         <div className="flex items-center justify-between text-xs text-zinc-400"><span>Vibrato smoothing</span><span>{vibSmooth}%</span></div>
                         <input type="range" min="0" max="100" step="1" value={vibSmooth} onChange={(e)=>setVibSmooth(parseInt(e.target.value))} className="w-full"/>
+                      </div>
+                      <div className="border-t border-zinc-700 pt-3 mt-3">
+                        <div className="text-xs text-zinc-400 mb-2">Audio Source (Testing)</div>
+                        <button 
+                          className="w-full px-3 py-2 rounded-xl border border-zinc-600 text-zinc-300 hover:bg-zinc-800 text-xs"
+                          onClick={async()=>{
+                            try{
+                              const stream = await navigator.mediaDevices.getDisplayMedia({ 
+                                audio: { 
+                                  echoCancellation: false, 
+                                  noiseSuppression: false, 
+                                  autoGainControl: false 
+                                }, 
+                                video: true // Required but we'll ignore the video track
+                              });
+                              // Remove video track - we only want audio
+                              stream.getVideoTracks().forEach(track => track.stop());
+                              if(stream.getAudioTracks().length === 0) {
+                                alert('No audio track found. Make sure to select "Share audio" when sharing.');
+                                return;
+                              }
+                              await initNodes(stream);
+                              alert('System audio capture active. Close the screen share to return to microphone.');
+                            }catch(err){ 
+                              console.error('System audio capture failed', err); 
+                              alert('Could not capture system audio. Try using microphone instead.');
+                            }
+                          }}
+                        >
+                          Capture System Audio (for testing)
+                        </button>
+                        <div className="text-[10px] text-zinc-500 mt-1">
+                          Shares screen to capture internal audio. Use for testing with headphones.
+                        </div>
                       </div>
                     </div>
                     <div className="flex items-center justify-end gap-2 mt-4">
