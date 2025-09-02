@@ -91,6 +91,17 @@
         const [gateDb,setGateDb]=useState(-45); const gateDbRef=useRef(-45); 
         const [meterDb,setMeterDb]=useState(-120); const meterSmooth=useRef(-120);
         
+        // Detect mobile
+        const [isMobile, setIsMobile] = useState(false);
+        useEffect(() => {
+          const checkMobile = () => {
+            setIsMobile(window.innerWidth <= 768 || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent));
+          };
+          checkMobile();
+          window.addEventListener('resize', checkMobile);
+          return () => window.removeEventListener('resize', checkMobile);
+        }, []);
+        
         // Generate gain background - simplified to medium gray like other sliders
         const gainBg = '#3f3f46';
         
@@ -127,7 +138,10 @@
         const [lockTol, setLockTol] = useState(10); const lockTolRef = useRef(10);
         const lockRatioRef = useRef(0);
         const [lockWin, setLockWin] = useState(0.17);
-        const [vibSmooth,setVibSmooth]=useState(0); const vibSmoothRef=useRef(0);
+        const [vibratoDetect,setVibratoDetect]=useState(0); const vibratoDetectRef=useRef(0);
+        
+        // Vibrato detection buffer for center-of-mass calculation
+        const vibratoBufferRef = useRef([]);
 
         // === Init mic ===
         useEffect(()=>{(async()=>{ try{ const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false } }); await initNodes(stream);}catch(err){ console.warn(err); alert('Please allow microphone access (use HTTPS/localhost).'); } })();},[]);
@@ -339,7 +353,7 @@
         useEffect(()=>{ gateDbRef.current = gateDb; }, [gateDb]);
         useEffect(()=>{ centerMidiRef.current = centerMidi; }, [centerMidi]);
         useEffect(()=>{ glowWinRef.current = lockWin; }, [lockWin]);
-        useEffect(()=>{ vibSmoothRef.current = (vibSmooth||0)/100; }, [vibSmooth]);
+        useEffect(()=>{ vibratoDetectRef.current = (vibratoDetect||0)/100; }, [vibratoDetect]);
         // keep lock tolerance ref in sync so retro trail + gauge react instantly
         useEffect(()=>{ lockTolRef.current = lockTol; }, [lockTol]);
         useEffect(()=>{ tauMsRef.current = tauMs; }, [tauMs]);
@@ -429,6 +443,40 @@
           if(freq>0 && confidence>0.2){
             const rawMidi = freqToMidi(freq);
             
+            // Update vibrato detection buffer
+            const now = performance.now()/1000;
+            vibratoBufferRef.current.push({t: now, midi: rawMidi});
+            // Keep only last 300ms of samples
+            while(vibratoBufferRef.current.length && now - vibratoBufferRef.current[0].t > 0.3) {
+              vibratoBufferRef.current.shift();
+            }
+            
+            // Calculate center of mass for vibrato detection
+            let vibratoCenter = rawMidi;
+            let isVibrato = false;
+            if (vibratoDetectRef.current > 0 && vibratoBufferRef.current.length >= 10) {
+              // Calculate average (center)
+              const sum = vibratoBufferRef.current.reduce((a, s) => a + s.midi, 0);
+              const center = sum / vibratoBufferRef.current.length;
+              
+              // Calculate deviations above and below center
+              let maxAbove = 0, maxBelow = 0;
+              vibratoBufferRef.current.forEach(s => {
+                const dev = s.midi - center;
+                if (dev > 0) maxAbove = Math.max(maxAbove, dev);
+                else maxBelow = Math.max(maxBelow, Math.abs(dev));
+              });
+              
+              // Check if oscillations are roughly symmetric (within 30% of each other)
+              if (maxAbove > 0.1 && maxBelow > 0.1) {
+                const ratio = Math.min(maxAbove, maxBelow) / Math.max(maxAbove, maxBelow);
+                if (ratio > 0.7) {
+                  isVibrato = true;
+                  vibratoCenter = center;
+                }
+              }
+            }
+            
             // Apply smoothing ONLY for line drawing
             const tau = Math.max(0, (tauMsRef.current ?? 120));
             const alpha = (tau<=0 ? 1 : (1 - Math.exp(-Math.max(dt, 1/60) / (tau/1000))));
@@ -436,18 +484,22 @@
             const midi = midiSmoothRef.current;
             lastMidiRef.current = midi;
 
-            // Calculate accuracy based on RAW pitch for instant response
+            // For accuracy display, use vibrato center if detected, otherwise raw
+            const midiForAccuracy = isVibrato ? vibratoCenter : rawMidi;
+            const nearestForAccuracy = Math.round(midiForAccuracy);
+            const detForAccuracy = centsOff(midiToFreq(midiForAccuracy), midiToFreq(nearestForAccuracy));
+            const absDetForAccuracy = Math.abs(detForAccuracy);
+            
+            // Calculate display values based on raw pitch (for responsiveness)
             const nearestRaw = Math.round(rawMidi);
             const detRaw = centsOff(freq, midiToFreq(nearestRaw));
-            const absDetRaw = Math.abs(detRaw);
             
             // Get tolerance value for use in multiple places
             const tolerance = lockTolRef.current ?? 10;
             
-            // Accuracy calculation aligned with lock tolerance:
-            // Map 0 to 50 cents linearly to 0-100%
-            const maxCents = 50; // Maximum cents for 0% accuracy
-            const accPercent = Math.round(Math.max(0, Math.min(100, 100 * (1 - absDetRaw / maxCents))));
+            // Accuracy calculation uses vibrato-adjusted value if enabled
+            const maxCents = 50;
+            const accPercent = Math.round(Math.max(0, Math.min(100, 100 * (1 - absDetForAccuracy / maxCents))));
 
             // Keep smoothed values for other uses
             const nearest = Math.round(midi);
@@ -463,10 +515,8 @@
               
               // Apply heavy smoothing to accuracy display to reduce vibrato jitter
               if (accSmoothRef.current === null) {
-                // First reading - set directly
                 accSmoothRef.current = accPercent;
               } else {
-                // Smooth subsequent readings (0.1 = heavy smoothing for stability)
                 const smoothAlpha = 0.1;
                 accSmoothRef.current = accSmoothRef.current * (1 - smoothAlpha) + accPercent * smoothAlpha;
               }
@@ -474,16 +524,14 @@
               setAccPct(smoothedAcc);
               
               // Color changes based on smoothed accuracy crossing the threshold
-              // The threshold line position represents where lock tolerance is
               const thresholdPercent = 100 * (1 - tolerance / 50);
               if (smoothedAcc >= thresholdPercent) { 
-                const pc=((nearestRaw%12)+12)%12; 
+                const pc=((nearestForAccuracy%12)+12)%12; 
                 setAccColor(NOTE_COLOR[pc]); 
               } else { 
                 setAccColor(null); 
               }
             } else {
-              // Start fading to silence
               fadeTimerRef.current += dt;
             }
 
@@ -502,22 +550,21 @@
               }
             }
 
-            // lock/glow update still uses SMOOTHED midi for stability
-            const now = performance.now()/1000;
-            lockBuf.current.push({t:now, nearest, cents:Math.abs((midi-nearest)*100)});
-            while(lockBuf.current.length && now-lockBuf.current[0].t>glowWinRef.current) lockBuf.current.shift();
-            const same = lockBuf.current.filter(s=>s.nearest===nearest);
+            // lock/glow update uses vibrato-adjusted midi when detected
+            const midiForGlow = isVibrato && vibratoDetectRef.current > 0 ? vibratoCenter : midi;
+            const nearestForGlow = Math.round(midiForGlow);
+            const nowGlow = performance.now()/1000;
+            lockBuf.current.push({t:nowGlow, nearest:nearestForGlow, cents:Math.abs((midiForGlow-nearestForGlow)*100), isVibrato});
+            while(lockBuf.current.length && nowGlow-lockBuf.current[0].t>glowWinRef.current) lockBuf.current.shift();
+            const same = lockBuf.current.filter(s=>s.nearest===nearestForGlow);
             const baseTol = (lockTolRef.current ?? 12);
-            let vibRms = 0; if (same.length){ const sum2 = same.reduce((a,s)=>a + s.cents*s.cents, 0); vibRms = Math.sqrt(sum2 / same.length); }
-            const vibNorm = clamp((vibRms - 5)/35, 0, 1);
-            const tolEff = baseTol * (1 + vibSmoothRef.current * vibNorm);
-            const within = same.filter(s=>s.cents < tolEff);
+            const within = same.filter(s=>s.cents < baseTol);
             const ratio = same.length ? within.length/same.length : 0;
             const need = (lockRatioRef.current ?? 0.0);
             const targetStrength = ratio>need ? Math.min(1, 0.8*ratio) : 0;
             const gamma = 1 - Math.exp(-Math.max(0, dt) / (glowRampMsRef.current/1000));
             glowStrengthRef.current = glowStrengthRef.current*(1-gamma) + targetStrength*gamma;
-            glowMidiRef.current = glowStrengthRef.current>0.02?nearest:null;
+            glowMidiRef.current = glowStrengthRef.current>0.02?nearestForGlow:null;
           } else {
             // No valid pitch detected, start fading to silence
             fadeTimerRef.current += dt;
@@ -534,7 +581,30 @@
             accSmoothRef.current = null; // Reset smoothing
           }
 
-          if(playingRef.current && freq>0 && (confidence>0.45 || (confidence>0.30 && zcr<0.18)) && aboveGate){ const now=performance.now()/1000; const mm = lastMidiRef.current ?? freqToMidi(freq); const near = Math.round(mm); tryWriteHistory({t:now, midi:mm, g: glowStrengthRef.current, nearest: near}); const cutoff=now-RETAIN_SEC; while(history.current.length && history.current[0].t<cutoff) history.current.shift(); }
+          if(playingRef.current && freq>0 && (confidence>0.45 || (confidence>0.30 && zcr<0.18)) && aboveGate){ 
+            const now=performance.now()/1000; 
+            // Calculate vibrato center for history storage
+            let histVibCenter = null;
+            if (vibratoDetectRef.current > 0 && vibratoBufferRef.current.length >= 10) {
+              const sum = vibratoBufferRef.current.reduce((a, s) => a + s.midi, 0);
+              const center = sum / vibratoBufferRef.current.length;
+              let maxAbove = 0, maxBelow = 0;
+              vibratoBufferRef.current.forEach(s => {
+                const dev = s.midi - center;
+                if (dev > 0) maxAbove = Math.max(maxAbove, dev);
+                else maxBelow = Math.max(maxBelow, Math.abs(dev));
+              });
+              if (maxAbove > 0.1 && maxBelow > 0.1) {
+                const ratio = Math.min(maxAbove, maxBelow) / Math.max(maxAbove, maxBelow);
+                if (ratio > 0.7) histVibCenter = center;
+              }
+            }
+            const mm = lastMidiRef.current ?? freqToMidi(freq); 
+            const near = Math.round(mm); 
+            tryWriteHistory({t:now, midi:mm, vibCenter: histVibCenter, g: glowStrengthRef.current, nearest: near}); 
+            const cutoff=now-RETAIN_SEC; 
+            while(history.current.length && history.current[0].t<cutoff) history.current.shift(); 
+          }
 
           drawGrid(scrollOffsetX.current); drawRail();
 
@@ -547,21 +617,64 @@
           for (let i = 1; i < history.current.length; i++) {
             const p0 = history.current[i - 1], p1 = history.current[i]; if (!p0 || !p1) continue;
             const segDt = p1.t - p0.t; const isGapSeg = (segDt > GAP_S) || (segDt * widthPxRef.current > GAP_PX); if (isGapSeg) continue;
-            const row0 = Math.round(p0.midi), row1 = Math.round(p1.midi); if (row0 !== row1) continue; const row = row0;
-            const win = glowWinRef.current; let same = 0, within = 0, sum2=0;
-            for (let k = i; k >= 0; k--) { const q = history.current[k]; if (!q) break; const dt = p1.t - q.t; if (dt > win) break; if (Math.round(q.midi) !== row) continue; same++; const cents = Math.abs((q.midi - row) * 100); sum2+=cents*cents; }
-            const baseTol = (lockTolRef.current ?? 12); const vibRms = same? Math.sqrt(sum2/same):0; const vibNorm = clamp((vibRms - 5)/35, 0, 1); const tolEff = baseTol * (1 + vibSmoothRef.current * vibNorm);
-            if (same) { within = 0; for (let k = i; k >= 0; k--) { const q = history.current[k]; if (!q) break; const dt = p1.t - q.t; if (dt > win) break; if (Math.round(q.midi)!==row) continue; const cents = Math.abs((q.midi-row)*100); if (cents < tolEff) within++; } }
-            const ratio = same ? within / same : 0; const g = ratio > 0 ? Math.min(1, 0.8 * ratio) : 0; if (g <= 0) continue;
+            
+            // Use vibrato center if available and enabled
+            const midi0 = (p0.vibCenter && vibratoDetectRef.current > 0) ? p0.vibCenter : p0.midi;
+            const midi1 = (p1.vibCenter && vibratoDetectRef.current > 0) ? p1.vibCenter : p1.midi;
+            
+            const row0 = Math.round(midi0), row1 = Math.round(midi1); 
+            if (row0 !== row1) continue; 
+            const row = row0;
+            
+            const win = glowWinRef.current; 
+            let same = 0, within = 0;
+            for (let k = i; k >= 0; k--) { 
+              const q = history.current[k]; 
+              if (!q) break; 
+              const dt = p1.t - q.t; 
+              if (dt > win) break; 
+              const qMidi = (q.vibCenter && vibratoDetectRef.current > 0) ? q.vibCenter : q.midi;
+              if (Math.round(qMidi) !== row) continue; 
+              same++; 
+              const cents = Math.abs((qMidi - row) * 100); 
+              if (cents < (lockTolRef.current ?? 12)) within++; 
+            }
+            
+            const ratio = same ? within / same : 0; 
+            const g = ratio > 0 ? Math.min(1, 0.8 * ratio) : 0; 
+            if (g <= 0) continue;
+            
             const x0 = headX + (playingRef.current ? 0 : viewOffsetRef.current) - (refNow - p0.t) * widthPxRef.current;
-            const x1 = headX + (playingRef.current ? 0 : viewOffsetRef.current) - (refNow - p1.t) * widthPxRef.current; if (x1 < 0 || x0 > w) continue;
-            const cy = midiToY(row, h); const top = cy - semitoneHRef.current / 2, ht = semitoneHRef.current; const segW = Math.max(1, x1 - x0);
-            const pc = ((row % 12) + 12) % 12; const col = NOTE_COLOR[pc];
-            ctx.save(); ctx.beginPath(); ctx.rect(x0, top, segW, ht); ctx.clip();
-            const band = ctx.createLinearGradient(0, top, 0, top + ht); const TRAIL_GAIN = 3; const aEdge = 0.14 * TRAIL_GAIN * g * glowIntRef.current; const aMid  = 0.28 * TRAIL_GAIN * g * glowIntRef.current;
-            band.addColorStop(0,   hex(col, aEdge)); band.addColorStop(0.5, hex(col, aMid)); band.addColorStop(1,   hex(col, aEdge));
-            ctx.fillStyle = band; ctx.fillRect(x0, top, segW, ht);
-            ctx.strokeStyle = hex(col, 0.45 * TRAIL_GAIN * g * glowIntRef.current); ctx.beginPath(); ctx.moveTo(x0, Math.round(cy) + 0.5); ctx.lineTo(x1, Math.round(cy) + 0.5); ctx.stroke();
+            const x1 = headX + (playingRef.current ? 0 : viewOffsetRef.current) - (refNow - p1.t) * widthPxRef.current; 
+            if (x1 < 0 || x0 > w) continue;
+            
+            // Use display row (not vibrato center) for visual position
+            const displayRow = Math.round(p0.midi);
+            const cy = midiToY(displayRow, h); 
+            const top = cy - semitoneHRef.current / 2, ht = semitoneHRef.current; 
+            const segW = Math.max(1, x1 - x0);
+            const pc = ((row % 12) + 12) % 12; 
+            const col = NOTE_COLOR[pc];
+            
+            ctx.save(); 
+            ctx.beginPath(); 
+            ctx.rect(x0, top, segW, ht); 
+            ctx.clip();
+            
+            const band = ctx.createLinearGradient(0, top, 0, top + ht); 
+            const TRAIL_GAIN = 3; 
+            const aEdge = 0.14 * TRAIL_GAIN * g * glowIntRef.current; 
+            const aMid  = 0.28 * TRAIL_GAIN * g * glowIntRef.current;
+            band.addColorStop(0,   hex(col, aEdge)); 
+            band.addColorStop(0.5, hex(col, aMid)); 
+            band.addColorStop(1,   hex(col, aEdge));
+            ctx.fillStyle = band; 
+            ctx.fillRect(x0, top, segW, ht);
+            ctx.strokeStyle = hex(col, 0.45 * TRAIL_GAIN * g * glowIntRef.current); 
+            ctx.beginPath(); 
+            ctx.moveTo(x0, Math.round(cy) + 0.5); 
+            ctx.lineTo(x1, Math.round(cy) + 0.5); 
+            ctx.stroke();
             ctx.restore();
           }
           ctx.restore();
@@ -586,6 +699,7 @@
         function tryWriteHistory(obj){
           try{
             const midi = (obj && (obj.midi ?? obj.m ?? obj.noteMidi ?? obj.mid ?? obj.val));
+            const vibCenter = obj?.vibCenter ?? null;
             const c = (obj?.conf ?? obj?.confidence ?? obj?.c ?? 1);
             if(!Number.isFinite(midi)) return; if(!(c > 0.2)) return; if(midi < 36 || midi > 93) return;
             const last = history.current[history.current.length-1];
@@ -593,11 +707,220 @@
               const dt = (obj.t ?? 0) - last.t; const dm = Math.abs(midi - last.midi);
               const tThresh = 0.3/Math.max(20, widthPxRef.current); const mThresh = 0.06; if(dt < tThresh && dm < mThresh) return;
             }
-            history.current.push({ t: (obj.t ?? performance.now()/1000), midi, row: (obj.nearest ?? Math.round(midi)) });
+            history.current.push({ t: (obj.t ?? performance.now()/1000), midi, vibCenter, row: (obj.nearest ?? Math.round(midi)) });
           } catch(err){ }
         }
 
         // === UI ===
+        // Mobile Layout
+        if (isMobile) {
+          return (
+            <div className="w-full h-full flex flex-col select-none bg-[#0b0f14]">
+              {/* Mobile Header */}
+              <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 bg-[#0e0e14]">
+                <div className="flex-1">
+                  <div className="text-xs text-zinc-500 mb-1">Current Note</div>
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-block h-6 w-6 rounded-full ${silenced ? 'bg-zinc-600/40' : 'bg-zinc-400/40'}`} 
+                          style={{ background: silenced ? '#71717a40' : (accColor ? accColor+'40' : '#9ca3af40') }}/>
+                    <div className={`text-2xl font-semibold ${silenced ? 'text-zinc-600' : 'text-white'}`}>
+                      {noteText}
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="flex-1">
+                  <div className="text-xs text-zinc-500 mb-1 text-right">Accuracy</div>
+                  <div className="relative">
+                    <div className="h-4 rounded-full overflow-hidden bg-zinc-800">
+                      <div className="h-full rounded-full transition-all duration-150" 
+                           style={{width:`${accPct ?? 0}%`, background: silenced ? '#71717a' : (accColor||'#71717a')}}></div>
+                      <div className="absolute top-0 h-full w-[2px] bg-white/30" 
+                           style={{left: `${100 * (1 - lockTol / 50)}%`}}/>
+                    </div>
+                    <div className="text-center text-xs mt-1 text-zinc-400">{accPct ?? 0}%</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Main Canvas Area */}
+              <div ref={containerRef} className="flex-1 relative grid grid-cols-[60px,1fr]" 
+                   style={{overscrollBehavior:'contain', touchAction:'none'}}>
+                <canvas ref={railRef} className="h-full w-[60px]" style={{touchAction:'none'}}></canvas>
+                <div className="relative h-full" style={{touchAction:'none'}}>
+                  <canvas ref={gridRef} className="absolute inset-0" style={{touchAction:'none'}}></canvas>
+                  <canvas ref={traceRef} className="absolute inset-0" style={{touchAction:'none'}}></canvas>
+                </div>
+              </div>
+
+              {/* Gain/Gate Controls */}
+              <div className="px-4 py-3 border-t border-zinc-800 bg-[#0e0e14]">
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-zinc-400 w-10">Gain</span>
+                    <input type="range" min="-30" max="30" step="1" value={gainDb} 
+                           onChange={(e)=>{ const v=parseInt(e.target.value); gainDbRef.current=v; setGainDb(v); }} 
+                           className="flex-1 gain appearance-none" style={{ '--gain-bg': '#3f3f46' }} />
+                    <span className="text-xs text-zinc-400 tabular-nums w-12 text-right">
+                      {gainDb>=0?'+':''}{gainDb} db
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-zinc-400 w-10">Gate</span>
+                    <input type="range" min="-80" max="-5" step="1" value={gateDb} 
+                           onChange={(e)=>{ const v=parseInt(e.target.value); gateDbRef.current=v; setGateDb(v); }} 
+                           className="flex-1 ngate appearance-none" style={{ '--ngate-bg': gateBg }} />
+                    <span className="text-xs text-zinc-400 tabular-nums w-12 text-right">
+                      {gateDb} db
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Bottom Navigation */}
+              <div className="flex items-center justify-around py-3 border-t border-zinc-800 bg-[#0e0e14]">
+                <button onClick={()=>setSettingsOpen(!settingsOpen)} 
+                        className="p-3 rounded-2xl bg-zinc-900/50 border border-zinc-700">
+                  <svg className="w-6 h-6 fill-zinc-300" viewBox="0 0 24 24">
+                    <path d="M12 15.5A3.5 3.5 0 0 1 8.5 12A3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5a3.5 3.5 0 0 1-3.5 3.5m7.43-2.53c.04-.32.07-.64.07-.97c0-.33-.03-.65-.07-.97l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.39-1.06-.73-1.69-.98l-.37-2.65A.506.506 0 0 0 14 2h-4c-.25 0-.46.18-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.08-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64L4.57 11c-.04.32-.07.64-.07.97c0 .33.03.65.07.97l-2.11 1.63c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.39 1.06.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.63-.25 1.17-.59 1.69-.98l2.49 1c.22.08.49 0 .61-.22l2-3.46c.13-.22.07-.49-.12-.64l-2.11-1.63Z"/>
+                  </svg>
+                </button>
+                
+                <button onClick={()=>{ 
+                  if (!playingRef.current) { 
+                    const now = performance.now()/1000; 
+                    const pausedGap = Math.max(0, now - drawNowRef.current); 
+                    if (pausedGap > 0) { 
+                      for (let i=0;i<history.current.length;i++){ history.current[i].t += pausedGap; } 
+                      for (let i=0;i<lockBuf.current.length;i++){ lockBuf.current[i].t += pausedGap; } 
+                    } 
+                    viewOffsetRef.current = 0; 
+                    drawNowRef.current = now; 
+                    drag.current.vx = 0; 
+                    setPlaying(true);
+                  } else { 
+                    setPlaying(false);
+                  } 
+                }} 
+                className="p-4 rounded-full bg-zinc-900 border border-zinc-700">
+                  {playing ? (
+                    <svg className="w-8 h-8 fill-zinc-100" viewBox="0 0 24 24">
+                      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                    </svg>
+                  ) : (
+                    <svg className="w-8 h-8 fill-zinc-100" viewBox="0 0 24 24">
+                      <path d="M8 5v14l11-7z"/>
+                    </svg>
+                  )}
+                </button>
+                
+                <button onClick={()=>{ 
+                  history.current=[]; 
+                  lockBuf.current=[]; 
+                  glowMidiRef.current=null; 
+                  glowStrengthRef.current=0; 
+                }} 
+                className="px-4 py-3 rounded-2xl bg-zinc-900/50 border border-zinc-700 text-zinc-300 text-sm">
+                  Clear
+                </button>
+              </div>
+
+              {/* Mobile Settings Panel (slides up from bottom) */}
+              {settingsOpen && (
+                <div className="fixed inset-0 bg-black/50 z-50" onClick={()=>setSettingsOpen(false)}>
+                  <div className="absolute bottom-0 left-0 right-0 bg-[#15151b] rounded-t-3xl border-t border-zinc-700 p-6 max-h-[80vh] overflow-y-auto"
+                       onClick={(e)=>e.stopPropagation()}>
+                    <div className="w-12 h-1 bg-zinc-600 rounded-full mx-auto mb-6"/>
+                    
+                    <div className="space-y-5">
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-zinc-300">Height</span>
+                          <span className="text-sm text-zinc-400">{semitoneH} px</span>
+                        </div>
+                        <input type="range" min="16" max="64" step="1" value={semitoneH} 
+                               onChange={(e)=>{ const n=parseInt(e.target.value); semitoneHRef.current=n; setSemitoneH(n); }} 
+                               className="w-full"/>
+                      </div>
+                      
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-zinc-300">Width</span>
+                          <span className="text-sm text-zinc-400">{widthPx} px</span>
+                        </div>
+                        <input type="range" min="20" max="140" step="1" value={widthPx} 
+                               onChange={(e)=>{ const n=parseInt(e.target.value); setWidthPx(n); widthPxRef.current=n; }} 
+                               className="w-full"/>
+                      </div>
+                      
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-zinc-300">Line Thickness</span>
+                          <span className="text-sm text-zinc-400">{linePx} px</span>
+                        </div>
+                        <input type="range" min="1" max="6" step="1" value={linePx} 
+                               onChange={(e)=>setLinePx(parseInt(e.target.value))} 
+                               className="w-full"/>
+                      </div>
+                      
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-zinc-300">Glow Intensity</span>
+                          <span className="text-sm text-zinc-400">{Math.round(glowInt*100)}%</span>
+                        </div>
+                        <input type="range" min="0.5" max="2" step="0.01" value={glowInt} 
+                               onChange={(e)=>setGlowInt(parseFloat(e.target.value))} 
+                               className="w-full"/>
+                      </div>
+                      
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-zinc-300">Lock Tolerance</span>
+                          <span className="text-sm text-zinc-400">±{lockTol} c</span>
+                        </div>
+                        <input type="range" min="5" max="30" step="1" value={lockTol} 
+                               onChange={(e)=>setLockTol(parseInt(e.target.value))} 
+                               className="w-full"/>
+                      </div>
+                      
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-zinc-300">Lock Window</span>
+                          <span className="text-sm text-zinc-400">{Math.round(lockWin*1000)} ms</span>
+                        </div>
+                        <input type="range" min="80" max="600" step="10" value={Math.round(lockWin*1000)} 
+                               onChange={(e)=>setLockWin(parseInt(e.target.value)/1000)} 
+                               className="w-full"/>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-zinc-300">Signal Smoothing</span>
+                          <span className="text-sm text-zinc-400">{tauMs} ms</span>
+                        </div>
+                        <input type="range" min="0" max="30" step="1" value={tauMs} 
+                               onChange={(e)=>setTauMs(parseInt(e.target.value))} 
+                               className="w-full"/>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-zinc-300">Vibrato Smoothing</span>
+                          <span className="text-sm text-zinc-400">{vibSmooth}%</span>
+                        </div>
+                        <input type="range" min="0" max="100" step="1" value={vibSmooth} 
+                               onChange={(e)=>setVibSmooth(parseInt(e.target.value))} 
+                               className="w-full"/>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        // Desktop Layout (original)
         return (
           <div className="w-full h-full flex flex-col select-none">
             {/* Header */}
@@ -647,7 +970,7 @@
                     )}
                   </div>
                 </button>
-                <button onClick={()=>{ history.current=[]; lockBuf.current=[]; glowMidiRef.current=null; glowStrengthRef.current=0; }} className="px-4 py-2 rounded-2xl bg-[#15151b] border border-white/10 text-zinc-300 hover:border-white/20">Clear History</button>
+                <button onClick={()=>{ history.current=[]; lockBuf.current=[]; glowMidiRef.current=null; glowStrengthRef.current=0; vibratoBufferRef.current=[]; }} className="px-4 py-2 rounded-2xl bg-[#15151b] border border-white/10 text-zinc-300 hover:border-white/20">Clear History</button>
 
                 {/* Current Note */}
                 <div className="flex flex-col items-center min-w-[140px]">
@@ -719,8 +1042,13 @@
                         <input type="range" min="80" max="600" step="10" value={Math.round(lockWin*1000)} onChange={(e)=>setLockWin(parseInt(e.target.value)/1000)} className="w-full"/>
                       </div>
                       <div>
-                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Vibrato smoothing</span><span>{vibSmooth}%</span></div>
-                        <input type="range" min="0" max="100" step="1" value={vibSmooth} onChange={(e)=>setVibSmooth(parseInt(e.target.value))} className="w-full"/>
+                        <div className="flex items-center justify-between text-xs text-zinc-400"><span>Vibrato detection</span><span>{vibratoDetect}%</span></div>
+                        <input type="range" min="0" max="100" step="10" value={vibratoDetect} onChange={(e)=>setVibratoDetect(parseInt(e.target.value))} className="w-full"/>
+                        <div className="text-[10px] text-zinc-500 mt-1">
+                          {vibratoDetect === 0 
+                            ? 'Off - uses instantaneous pitch' 
+                            : 'Detects symmetric vibrato and uses center pitch for accuracy'}
+                        </div>
                       </div>
                       <div className="border-t border-zinc-700 pt-3 mt-3">
                         <div className="text-xs text-zinc-400 mb-2">Audio Source (Testing)</div>
@@ -758,7 +1086,7 @@
                       </div>
                     </div>
                     <div className="flex items-center justify-end gap-2 mt-4">
-                      <button className="px-3 py-1.5 rounded-xl border border-white/10 text-zinc-300 hover:bg-white/5" onClick={()=>{ setTauMs(0); setLinePx(2); setGlowResp(0); setGlowInt(1.0); setLockTol(10); setLockWin(0.17); setVibSmooth(0); }}>Reset</button>
+                      <button className="px-3 py-1.5 rounded-xl border border-white/10 text-zinc-300 hover:bg-white/5" onClick={()=>{ setTauMs(0); setLinePx(2); setGlowResp(0); setGlowInt(1.0); setLockTol(10); setLockWin(0.17); setVibratoDetect(0); }}>Reset</button>
                       <button className="px-3 py-1.5 rounded-xl bg-zinc-800 border border-white/10 text-zinc-100 hover:bg-zinc-700" onClick={()=>setSettingsOpen(false)}>Close</button>
                     </div>
                   </div>
