@@ -30,6 +30,23 @@
       input.gain{appearance:none;-webkit-appearance:none;background:transparent;border:0;outline:none;border-radius:9999px;box-shadow:none}
       input.gain::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;height:12px;width:12px;border:0;border-radius:9999px;background:#cbd5e1;box-shadow:0 0 0 2px rgba(0,0,0,.25);margin-top:0}
       input.gain::-moz-range-thumb{height:12px;width:12px;border:0;border-radius:9999px;background:#cbd5e1;box-shadow:0 0 0 2px rgba(0,0,0,.25)}
+      
+      /* Mobile-specific slider styles - vertical pills */
+      @media (max-width: 768px), (hover: none) and (pointer: coarse) {
+        input.ngate::-webkit-slider-thumb,
+        input.gain::-webkit-slider-thumb {
+          width: 12px !important;
+          height: 32px !important;
+          border-radius: 6px !important;
+          margin-top: -10px !important;
+        }
+        input.ngate::-moz-range-thumb,
+        input.gain::-moz-range-thumb {
+          width: 12px !important;
+          height: 32px !important;
+          border-radius: 6px !important;
+        }
+      }
     </style>
   </head>
   <body>
@@ -84,15 +101,11 @@
         const headFrac=0.75;
         const containerRef=useRef(null), railRef=useRef(null), gridRef=useRef(null), traceRef=useRef(null);
         const auditionRef = useRef(false);
-        const [semitoneH,setSemitoneH]=useState(40); const semitoneHRef=useRef(40);
-        const [widthPx, setWidthPx] = useState(100); const widthPxRef = useRef(100);
-        const [centerMidi,setCenterMidi]=useState(60); const centerMidiRef=useRef(60);
-        const [gainDb,setGainDb]=useState(0); const gainDbRef=useRef(0);
-        const [gateDb,setGateDb]=useState(-45); const gateDbRef=useRef(-45); 
-        const [meterDb,setMeterDb]=useState(-120); const meterSmooth=useRef(-120);
         
-        // Detect mobile
-        const [isMobile, setIsMobile] = useState(false);
+        // Detect mobile - must be before we use isMobile in state initialization
+        const [isMobile, setIsMobile] = useState(() => {
+          return window.innerWidth <= 768 || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        });
         useEffect(() => {
           const checkMobile = () => {
             setIsMobile(window.innerWidth <= 768 || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent));
@@ -102,18 +115,29 @@
           return () => window.removeEventListener('resize', checkMobile);
         }, []);
         
-        // Generate gain background - simplified to medium gray like other sliders
-        const gainBg = '#3f3f46';
+        const [semitoneH,setSemitoneH]=useState(40); const semitoneHRef=useRef(40);
+        const [widthPx, setWidthPx] = useState(100); const widthPxRef = useRef(100);
+        const [centerMidi,setCenterMidi]=useState(60); const centerMidiRef=useRef(60);
+        const [gainDb,setGainDb]=useState(isMobile ? 13 : 0); const gainDbRef=useRef(isMobile ? 13 : 0);
+        const [gateDb,setGateDb]=useState(-45); const gateDbRef=useRef(-45); 
+        const [meterDb,setMeterDb]=useState(-120); const meterSmooth=useRef(-120);
+        
+        // Generate gain background - neutral gray fill showing slider position
+        const gainBg = (() => {
+          const min = -24, max = 24;
+          const val = Math.max(min, Math.min(max, gainDb));
+          const pct = ((val - min) / (max - min)) * 100;
+          const fillColor = '#9ca3af'; // neutral gray
+          return `linear-gradient(to right, ${fillColor} 0%, ${fillColor} ${pct}%, #3f3f46 ${pct}%, #3f3f46 100%)`;
+        })();
         
         // Generate noise gate background with level indicator
         const gateBg = (()=>{ 
           const min=-80, max=-5; 
           const m=Math.max(min, Math.min(max, Number.isFinite(meterDb)? meterDb : min)); 
           const pct=((m-min)/(max-min))*100; 
-          // Color the meter based on gain setting
-          let meterColor = '#22c55e'; // default green
-          if (gainDbRef.current > 5) meterColor = '#3b82f6'; // blue for boost
-          else if (gainDbRef.current < -5) meterColor = '#ef4444'; // red for cut
+          // Color based on whether signal is passing through the gate
+          const meterColor = (meterDb > gateDb) ? '#22c55e' : '#606069'; // green if above gate, gray if below
           return `linear-gradient(to right, ${meterColor} 0%, ${meterColor} ${pct}%, #3f3f46 ${pct}%, #3f3f46 100%)`; 
         })();
         
@@ -124,10 +148,12 @@
         const history=useRef([]); const lastMidiRef=useRef(null); const midiSmoothRef=useRef(null); const lastManualScrollRef=useRef(0);
         const lockBuf=useRef([]); const glowMidiRef=useRef(null); const glowStrengthRef=useRef(0);
         const [noteText,setNoteText]=useState('—'); const [detuneText,setDetuneText]=useState('—'); 
-        const [accPct,setAccPct]=useState(null); // Start with null instead of 0
+        const [accPct,setAccPct]=useState(null); // Start with null instead of 0 - for bar width
+        const [accPctText,setAccPctText]=useState(null); // Separate state for displayed text
         const [accColor,setAccColor]=useState(null);
         const [silenced, setSilenced] = useState(true); const silencedRef = useRef(true); const fadeTimerRef = useRef(0);
-        const accSmoothRef = useRef(null); // Add smoothing for accuracy display only
+        const accSmoothRef = useRef(null); // Add smoothing for accuracy bar
+        const accTextSmoothRef = useRef(null); // Separate smoothing for text display
         const [tauMs,setTauMs]=useState(0); const tauMsRef=useRef(0);
         const [linePx,setLinePx]=useState(2); const linePxRef=useRef(2);
         const [glowResp,setGlowResp]=useState(0); const glowRespRef=useRef(0.5);
@@ -513,15 +539,26 @@
               setNoteText(midiToNoteName(nearestRaw));
               setDetuneText(`${detRaw>=0?'+':''}${detRaw.toFixed(0)}c`);
               
-              // Apply heavy smoothing to accuracy display to reduce vibrato jitter
+              // Apply smoothing to accuracy display with separate values for bar and text
+              // Bar uses 0.2 for responsiveness, text uses 0.1 for readability
               if (accSmoothRef.current === null) {
                 accSmoothRef.current = accPercent;
               } else {
-                const smoothAlpha = 0.1;
-                accSmoothRef.current = accSmoothRef.current * (1 - smoothAlpha) + accPercent * smoothAlpha;
+                const smoothAlphaBar = 0.2;
+                accSmoothRef.current = accSmoothRef.current * (1 - smoothAlphaBar) + accPercent * smoothAlphaBar;
               }
               const smoothedAcc = Math.round(accSmoothRef.current);
               setAccPct(smoothedAcc);
+              
+              // Smoother text display
+              if (accTextSmoothRef.current === null) {
+                accTextSmoothRef.current = accPercent;
+              } else {
+                const smoothAlphaText = 0.1;
+                accTextSmoothRef.current = accTextSmoothRef.current * (1 - smoothAlphaText) + accPercent * smoothAlphaText;
+              }
+              const smoothedAccText = Math.round(accTextSmoothRef.current);
+              setAccPctText(smoothedAccText);
               
               // Color changes based on smoothed accuracy crossing the threshold
               const thresholdPercent = 100 * (1 - tolerance / 50);
@@ -578,7 +615,9 @@
             setDetuneText('—'); 
             setAccColor(null);
             setAccPct(null); // Set to null instead of 0
+            setAccPctText(null); // Reset text display too
             accSmoothRef.current = null; // Reset smoothing
+            accTextSmoothRef.current = null; // Reset text smoothing
           }
 
           if(playingRef.current && freq>0 && (confidence>0.45 || (confidence>0.30 && zcr<0.18)) && aboveGate){ 
@@ -717,28 +756,32 @@
           return (
             <div className="w-full h-full flex flex-col select-none bg-[#0b0f14]">
               {/* Mobile Header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 bg-[#0e0e14]">
-                <div className="flex-1">
+              <div className="flex items-start gap-4 px-4 py-3 border-b border-zinc-800 bg-[#0e0e14]">
+                <div className="flex-none" style={{width: '100px'}}>
                   <div className="text-xs text-zinc-500 mb-1">Current Note</div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2" style={{ color: silenced ? '#71717a' : (accColor || '#9ca3af') }}>
                     <span className={`inline-block h-6 w-6 rounded-full ${silenced ? 'bg-zinc-600/40' : 'bg-zinc-400/40'}`} 
                           style={{ background: silenced ? '#71717a40' : (accColor ? accColor+'40' : '#9ca3af40') }}/>
-                    <div className={`text-2xl font-semibold ${silenced ? 'text-zinc-600' : 'text-white'}`}>
+                    <div className={`text-2xl font-semibold ${silenced ? 'text-zinc-600' : ''}`}>
                       {noteText}
                     </div>
                   </div>
                 </div>
                 
-                <div className="flex-1">
-                  <div className="text-xs text-zinc-500 mb-1 text-right">Accuracy</div>
-                  <div className="relative">
-                    <div className="h-5 rounded-full overflow-hidden bg-zinc-800">
-                      <div className="h-full rounded-full transition-all duration-150" 
-                           style={{width:`${accPct ?? 0}%`, background: silenced ? '#71717a' : (accColor||'#71717a')}}></div>
-                      <div className="absolute top-0 h-full w-[2px] bg-white/30" 
-                           style={{left: `${100 * (1 - lockTol / 50)}%`}}/>
+                <div className="flex-1 min-w-0 flex flex-col justify-between" style={{height: '44px'}}>
+                  <div className="text-xs text-zinc-500 text-right">Accuracy</div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="relative flex-1 min-w-0">
+                      <div className="h-5 rounded-full overflow-hidden bg-zinc-800 relative">
+                        <div className="h-full rounded-full" 
+                             style={{width:`${accPct ?? 0}%`, background: silenced ? '#71717a' : (accColor||'#71717a')}}></div>
+                      </div>
+                      <div className="absolute top-0 left-0 right-0 h-5 pointer-events-none flex items-center">
+                        <div className="w-[2px] h-full bg-white/30" 
+                             style={{marginLeft: `calc(${100 * (1 - lockTol / 50)}% - 1px)`}}/>
+                      </div>
                     </div>
-                    <div className="text-center text-xs mt-1 text-zinc-400">{accPct ?? 0}%</div>
+                    <div className="text-xs text-zinc-400 tabular-nums w-8 text-right flex-none">{accPctText ?? 0}%</div>
                   </div>
                 </div>
               </div>
@@ -761,32 +804,11 @@
                     <div className="flex-1 relative">
                       <input type="range" min="-30" max="30" step="1" value={gainDb} 
                              onChange={(e)=>{ const v=parseInt(e.target.value); gainDbRef.current=v; setGainDb(v); }} 
-                             className="w-full" 
-                             style={{ 
-                               WebkitAppearance: 'none',
-                               appearance: 'none',
-                               background: 'transparent',
-                               height: '20px'
-                             }} />
-                      <style>{`
-                        input[type="range"]::-webkit-slider-track {
-                          height: 20px;
-                          background: #3f3f46;
-                          border-radius: 10px;
-                        }
-                        input[type="range"]::-webkit-slider-thumb {
-                          -webkit-appearance: none;
-                          appearance: none;
-                          width: 20px;
-                          height: 20px;
-                          background: #cbd5e1;
-                          border-radius: 50%;
-                          cursor: pointer;
-                        }
-                      `}</style>
+                             className="w-full gain" 
+                             style={{ '--gain-bg': gainBg }} />
                     </div>
                     <span className="text-xs text-zinc-400 tabular-nums w-10 text-right">
-                      {gainDb>=0?'+':''}{gainDb} db
+                      {gainDb>=0?'+':''}{gainDb}{isMobile ? '' : ' db'}
                     </span>
                   </div>
                   
@@ -805,7 +827,7 @@
                              }} />
                     </div>
                     <span className="text-xs text-zinc-400 tabular-nums w-10 text-right">
-                      {gateDb} db
+                      {gateDb}{isMobile ? '' : ' db'}
                     </span>
                   </div>
                 </div>
@@ -941,16 +963,6 @@
                                  onChange={(e)=>setTauMs(parseInt(e.target.value))} 
                                  className="w-full"/>
                         </div>
-
-                        <div>
-                          <div className="flex justify-between items-center mb-2">
-                            <span className="text-sm text-zinc-300">Vibrato Smoothing</span>
-                            <span className="text-sm text-zinc-400">{vibSmooth}%</span>
-                          </div>
-                          <input type="range" min="0" max="100" step="1" value={vibSmooth} 
-                                 onChange={(e)=>setVibSmooth(parseInt(e.target.value))} 
-                                 className="w-full"/>
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -974,12 +986,12 @@
                     <div className="grid items-center gap-3" style={{gridTemplateColumns:'80px 104px auto'}}>
                       <div className="text-xs text-zinc-400 text-right">Input Gain</div>
                       <input type="range" min="-30" max="30" step="1" value={gainDb} onChange={(e)=>{ const v=parseInt(e.target.value); gainDbRef.current=v; setGainDb(v); }} className="w-[104px] justify-self-center gain appearance-none" style={{ '--gain-bg': gainBg }} />
-                      <div className="text-xs text-zinc-400 tabular-nums">{gainDb>=0?'+':''}{gainDb} dB</div>
+                      <div className="text-xs text-zinc-400 tabular-nums">{gainDb>=0?'+':''}{gainDb}{isMobile ? '' : ' dB'}</div>
                     </div>
                     <div className="grid items-center gap-3" style={{gridTemplateColumns:'80px 104px auto'}}>
                       <div className="text-xs text-zinc-400 text-right">Noise Gate</div>
                       <input type="range" min="-80" max="-5" step="1" value={gateDb} onChange={(e)=>{ const v=parseInt(e.target.value); gateDbRef.current=v; setGateDb(v); }} className="w-[104px] justify-self-center ngate appearance-none" style={{ '--ngate-bg': gateBg }} />
-                      <div className="text-xs text-zinc-400 tabular-nums">{gateDb} dB{gateDb<=-70? ' (off)':''}</div>
+                      <div className="text-xs text-zinc-400 tabular-nums">{gateDb}{isMobile ? '' : ' dB'}{gateDb<=-70? ' (off)':''}</div>
                     </div>
                   </div>
                   
@@ -1035,7 +1047,7 @@
                         }}
                       />
                     </div>
-                    <div className={`text-center text-xs mt-1 ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>{accPct ?? 0}%</div>
+                    <div className={`text-center text-xs mt-1 ${silenced ? 'text-zinc-600' : 'text-zinc-400'}`}>{accPctText ?? 0}%</div>
                   </div>
                 </div>
 
@@ -1054,7 +1066,12 @@
                   </div>
                 </button>
                 {settingsOpen && (
-                  <div className="absolute right-0 top-12 z-50 w-72 rounded-2xl border border-white/10 bg-[#15151b] shadow-xl p-4">
+                  <>
+                    {/* Backdrop */}
+                    <div className="fixed inset-0 bg-black/50 z-40" onClick={()=>setSettingsOpen(false)} style={{touchAction: 'none'}}></div>
+                    
+                    {/* Settings Panel */}
+                    <div className={`${isMobile ? 'fixed bottom-0 left-0 right-0 rounded-t-3xl max-h-[70vh] overflow-y-auto' : 'absolute right-0 top-12 w-72 rounded-2xl'} z-50 border border-white/10 bg-[#15151b] shadow-xl p-4`} style={isMobile ? {touchAction: 'pan-y'} : {}}>
                     <div className="text-sm text-zinc-300 font-medium mb-3">Tuning Settings</div>
                     <div className="space-y-4">
                       <div>
@@ -1129,7 +1146,8 @@
                       <button className="px-3 py-1.5 rounded-xl border border-white/10 text-zinc-300 hover:bg-white/5" onClick={()=>{ setTauMs(0); setLinePx(2); setGlowResp(0); setGlowInt(1.0); setLockTol(10); setLockWin(0.17); setVibratoDetect(0); }}>Reset</button>
                       <button className="px-3 py-1.5 rounded-xl bg-zinc-800 border border-white/10 text-zinc-100 hover:bg-zinc-700" onClick={()=>setSettingsOpen(false)}>Close</button>
                     </div>
-                  </div>
+                    </div>
+                  </>
                 )}
               </div>
             </div>
